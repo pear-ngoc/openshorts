@@ -6,7 +6,7 @@ import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
-export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, onPlay, onPause }) {
+export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, geminiBaseUrl, llmProvider, llmModel, elevenLabsKey, onPlay, onPause }) {
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const videoRef = React.useRef(null);
@@ -66,6 +66,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         setEditError(null);
         try {
             const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
+            const baseUrl = geminiBaseUrl || localStorage.getItem('gemini_base_url');
+            const provider = llmProvider || localStorage.getItem('llm_provider') || 'gemini';
+            const model = llmModel || localStorage.getItem('llm_model') || '';
 
             if (!apiKey) {
                 throw new Error("Gemini API Key is missing. Please set it in Settings.");
@@ -76,7 +79,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Gemini-Key': apiKey
+                    'X-LLM-Key': apiKey,
+                    'X-LLM-Provider': provider,
+                    ...(baseUrl?.trim() ? { 'X-LLM-Base-Url': baseUrl.trim() } : {}),
+                    ...(model?.trim() ? { 'X-LLM-Model': model.trim() } : {}),
                 },
                 body: JSON.stringify({
                     job_id: jobId,
@@ -108,7 +114,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Gemini-Key': apiKey
+                    'X-LLM-Key': apiKey,
+                    'X-LLM-Provider': provider,
+                    ...(baseUrl?.trim() ? { 'X-LLM-Base-Url': baseUrl.trim() } : {}),
+                    ...(model?.trim() ? { 'X-LLM-Model': model.trim() } : {}),
                 },
                 body: JSON.stringify({
                     job_id: jobId,

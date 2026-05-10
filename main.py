@@ -1,4 +1,5 @@
 import time
+import math
 import cv2
 import scenedetect
 import subprocess
@@ -16,17 +17,134 @@ import yt_dlp
 import mediapipe as mp
 # import whisper (replaced by faster_whisper inside function)
 from google import genai
+from google.genai import types
+from openai import OpenAI as _OpenAI
 from dotenv import load_dotenv
 import json
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
 
-# Load environment variables
+# Load environment variables FIRST so module-level env reads pick up .env values
 load_dotenv()
+
+# ─── Transcription Provider Config ───────────────────────────────────────
+TRANSCRIPTION_PROVIDER = os.getenv("TRANSCRIPTION_PROVIDER", "local").lower()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo")
+GROQ_BASE_URL = os.getenv("GROQ_TRANSCRIPTION_BASE_URL", "https://api.groq.com/openai/v1")
+TRANSCRIPTION_CHUNK_SECONDS = int(os.getenv("TRANSCRIPTION_CHUNK_SECONDS", "600"))
+TRANSCRIPTION_STRICT = os.getenv("TRANSCRIPTION_STRICT", "false").lower() in ("1", "true", "yes")
+
+# ─── LLM Provider Config ───────────────────────────────────────────────────
+def get_llm_config():
+    """
+    Returns (provider, api_key, base_url, model) from environment.
+    Supports both new LLM_* vars and legacy GEMINI_* vars for backward compat.
+    """
+    provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")
+    base_url = os.getenv("LLM_BASE_URL") or os.getenv("GEMINI_BASE_URL") or ""
+    model = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+    return provider, api_key, base_url, model
+
+
+def _mask_key(key):
+    """Mask API key for safe logging."""
+    if not key:
+        return "(not set)"
+    if len(key) <= 8:
+        return key[:3] + "..."
+    return key[:4] + "..." + key[-4:]
+
+
+def _build_gemini_client(api_key, base_url=None):
+    """Build a genai.Client, optionally with a custom base URL."""
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["http_options"] = types.HttpOptions(base_url=base_url)
+    return genai.Client(**kwargs)
+
+
+def _is_gemini_quota_error(exception: Exception) -> bool:
+    """Detect if an exception is a Gemini quota/rate-limit error."""
+    msg = str(exception).lower()
+    return any(tag in msg for tag in ['429', 'quota', 'rate limit', 'rate_limit',
+                                       'resourceexhausted', 'internal error', 'service unavailable'])
 
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
+
+def _make_transcript_fallback_clips(transcript_result: dict, video_duration: float) -> list:
+    """
+    When Gemini fails (quota/exhausted), extract short clips (30-60s) from
+    the first speaking segments in the transcript.
+    """
+    segments = transcript_result.get('segments', [])
+    clips = []
+    clip_duration_min = 30
+    clip_duration_max = 60
+
+    # Collect speaking segments (skip segments with very short/no text)
+    speaking_parts = []
+    for seg in segments:
+        text = seg.get('text', '').strip()
+        if len(text) < 5:
+            continue
+        seg_start = seg.get('start', 0)
+        seg_end = seg.get('end', 0)
+        duration = seg_end - seg_start
+        if duration < 5:
+            continue
+        speaking_parts.append({'start': seg_start, 'end': seg_end, 'text': text})
+
+    if not speaking_parts:
+        return []
+
+    # Try to build clips of 30-60s from consecutive speaking segments
+    current_clip_start = speaking_parts[0]['start']
+    current_clip_end = speaking_parts[0]['end']
+
+    for seg in speaking_parts[1:]:
+        seg_start = seg['start']
+        seg_end = seg['end']
+        gap = seg_start - current_clip_end
+
+        if gap <= 5.0 and (current_clip_end - current_clip_start) < clip_duration_max:
+            # Extend current clip
+            current_clip_end = seg_end
+        else:
+            # Close current clip if it meets minimum
+            clip_len = current_clip_end - current_clip_start
+            if clip_len >= clip_duration_min:
+                clips.append({
+                    'start': current_clip_start,
+                    'end': current_clip_end,
+                    'video_title_for_youtube_short': 'Fallback Clip',
+                    'video_description_for_tiktok': 'Generated from transcript (Gemini unavailable)',
+                    'video_description_for_instagram': 'Generated from transcript (Gemini unavailable)',
+                    'viral_hook_text': '',
+                    'fallback_reason': 'gemini_failed'
+                })
+            # Start new clip
+            current_clip_start = seg_start
+            current_clip_end = seg_end
+
+    # Don't forget the last clip
+    clip_len = current_clip_end - current_clip_start
+    if clip_len >= clip_duration_min and len(clips) < 15:
+        clips.append({
+            'start': current_clip_start,
+            'end': current_clip_end,
+            'video_title_for_youtube_short': 'Fallback Clip',
+            'video_description_for_tiktok': 'Generated from transcript (Gemini unavailable)',
+            'video_description_for_instagram': 'Generated from transcript (Gemini unavailable)',
+            'viral_hook_text': '',
+            'fallback_reason': 'gemini_failed'
+        })
+
+    print(f"   📋 Created {len(clips)} fallback clips from transcript speech segments.")
+    return clips[:15]  # Cap at 15 clips like Gemini would
 
 GEMINI_PROMPT_TEMPLATE = """
 You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 15 and 60 seconds long.
@@ -68,7 +186,8 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
 """
 
 # Load the YOLO model once (Keep for backup or scene analysis if needed)
-model = YOLO('yolov8n.pt')
+YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "/app/models/yolov8n.pt")
+model = YOLO(YOLO_MODEL_PATH)
 
 # --- MediaPipe Setup ---
 # Use standard Face Detection (BlazeFace) for speed
@@ -747,65 +866,346 @@ def process_video_to_vertical(input_video, final_output_video):
     
     return True
 
-def transcribe_video(video_path):
-    print("🎙️  Transcribing video with Faster-Whisper (CPU Optimized)...")
+def extract_audio_for_transcription(video_path: str, output_audio_path: str) -> bool:
+    """Extract audio from video for transcription (16kHz mono MP3)."""
+    import subprocess
+    cmd = [
+        'ffmpeg', '-y', '-i', video_path,
+        '-vn', '-ac', '1', '-ar', '16000',
+        '-b:a', '64k', output_audio_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"   ⚠️ Audio extraction failed: {e.stderr.decode()}")
+        return False
+
+
+def _get_audio_duration(audio_path: str) -> float:
+    """Get audio duration in seconds via ffprobe."""
+    import subprocess
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        audio_path
+    ]
+    try:
+        result = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode().strip()
+        return float(result)
+    except Exception:
+        return 0.0
+
+
+def transcribe_with_groq(audio_path: str) -> list[dict]:
+    """Transcribe audio using Groq Whisper API with chunking support."""
+    import time
+    from openai import OpenAI
+
+    chunk_duration = TRANSCRIPTION_CHUNK_SECONDS
+    total_duration = _get_audio_duration(audio_path)
+    model_name = GROQ_MODEL
+
+    print(f"🎙️  Transcribing with Groq Whisper...")
+    print(f"   model: {model_name}")
+    print(f"   audio duration: {total_duration:.1f}s")
+
+    if total_duration == 0:
+        raise RuntimeError("Could not determine audio duration")
+
+    # Single chunk: no splitting needed
+    if total_duration <= chunk_duration:
+        return _transcribe_groq_chunk(audio_path, chunk_offset=0.0, chunk_index=0)
+
+    # Multi-chunk: split audio into parts
+    chunk_files = []
+    num_chunks = int(math.ceil(total_duration / chunk_duration))
+    print(f"   audio > {chunk_duration}s → splitting into {num_chunks} chunks")
+
+    for i in range(num_chunks):
+        start_sec = i * chunk_duration
+        chunk_path = audio_path.replace('.mp3', f'.chunk_{i:03d}.mp3')
+        cmd = [
+            'ffmpeg', '-y', '-i', audio_path,
+            '-ss', str(start_sec),
+            '-t', str(chunk_duration),
+            '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k',
+            chunk_path
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        chunk_files.append((chunk_path, start_sec))
+        print(f"   chunk {i+1}/{num_chunks}: {start_sec:.1f}s - {start_sec + chunk_duration:.1f}s")
+
+    all_segments = []
+    start_time = time.time()
+
+    for idx, (chunk_path, offset) in enumerate(chunk_files):
+        segments = _transcribe_groq_chunk(chunk_path, chunk_offset=offset, chunk_index=idx)
+        all_segments.extend(segments)
+        # Cleanup chunk file
+        try:
+            os.remove(chunk_path)
+        except OSError:
+            pass
+
+    elapsed = time.time() - start_time
+    print(f"   Groq transcription done in {elapsed:.1f}s — {len(all_segments)} segments")
+    return all_segments
+
+
+def _transcribe_groq_chunk(audio_path: str, chunk_offset: float, chunk_index: int) -> list[dict]:
+    """Transcribe a single audio chunk via Groq Whisper API."""
+    import time
+    from openai import OpenAI
+
+    start_time = time.time()
+    client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL)
+
+    with open(audio_path, "rb") as audio_file:
+        response = client.audio.transcriptions.create(
+            model=GROQ_MODEL,
+            file=audio_file,
+            response_format="verbose_json",
+            timestamp_granularities=["segment"],
+        )
+
+    elapsed = time.time() - start_time
+    print(f"   [{chunk_index}] Groq chunk transcribed in {elapsed:.1f}s")
+
+    # Handle both OpenAI response object and raw dict
+    data = response
+    if hasattr(response, 'model_dump'):
+        data = response.model_dump()
+    elif hasattr(response, 'dict'):
+        data = response.dict()
+
+    segments = []
+    raw_segments = data.get('segments', [])
+    for seg in raw_segments:
+        start = seg.get('start', 0) + chunk_offset
+        end = seg.get('end', 0) + chunk_offset
+        text = seg.get('text', '').strip()
+        segments.append({'start': start, 'end': end, 'text': text})
+
+    return segments
+
+
+def transcribe_with_local_whisper(audio_path: str) -> list[dict]:
+    """Transcribe audio using Faster-Whisper (local CPU)."""
     from faster_whisper import WhisperModel
-    
-    # Run on CPU with INT8 quantization for speed
+
+    print("🎙️  Transcribing with Faster-Whisper (CPU Optimized)...")
     model = WhisperModel("base", device="cpu", compute_type="int8")
-    
-    segments, info = model.transcribe(video_path, word_timestamps=True)
-    
+    segments, info = model.transcribe(audio_path, word_timestamps=True)
+
     print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")
-    
-    # Convert to openai-whisper compatible format
-    transcript_segments = []
-    full_text = ""
-    
-    for segment in segments:
-        # Print progress to keep user informed (and prevent timeouts feeling)
-        print(f"   [{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}")
-        
+
+    result = []
+    for seg in segments:
+        print(f"   [{seg.start:.2f}s -> {seg.end:.2f}s] {seg.text}")
         seg_dict = {
-            'text': segment.text,
-            'start': segment.start,
-            'end': segment.end,
+            'text': seg.text,
+            'start': seg.start,
+            'end': seg.end,
             'words': []
         }
-        
-        if segment.words:
-            for word in segment.words:
+        if seg.words:
+            for word in seg.words:
                 seg_dict['words'].append({
                     'word': word.word,
                     'start': word.start,
                     'end': word.end,
                     'probability': word.probability
                 })
-        
-        transcript_segments.append(seg_dict)
-        full_text += segment.text + " "
-        
+        result.append(seg_dict)
+
+    return result
+
+
+def transcribe_audio(audio_path: str) -> list[dict]:
+    """
+    Unified transcription entry point.
+    Selects provider based on TRANSCRIPTION_PROVIDER env var and falls back on error.
+
+    Returns list of dicts with keys: start, end, text  (and optionally 'words').
+    """
+    provider = TRANSCRIPTION_PROVIDER
+    groq_key = os.getenv("GROQ_API_KEY", "")
+
+    if provider == "groq":
+        if not groq_key:
+            print("⚠️  TRANSCRIPTION_PROVIDER=groq but GROQ_API_KEY is not set. Falling back to local Faster-Whisper.")
+        else:
+            try:
+                return transcribe_with_groq(audio_path)
+            except Exception as e:
+                print(f"❌ Groq transcription failed: {e}")
+                if TRANSCRIPTION_STRICT:
+                    raise RuntimeError(f"Groq transcription failed in strict mode: {e}") from e
+                print("🔄 Falling back to local Faster-Whisper...")
+
+    # Default: local Faster-Whisper
+    return transcribe_with_local_whisper(audio_path)
+
+
+def transcribe_video(video_path: str) -> dict:
+    """
+    Full transcription pipeline for a video file.
+    Returns dict: {text, segments, language}
+    - segments: list of {start, end, text, words?} — compatible with Gemini and downstream.
+    """
+    import math
+
+    audio_path = video_path + ".transcribe.mp3"
+
+    if not extract_audio_for_transcription(video_path, audio_path):
+        # Fallback: try transcribing the video directly (some formats work)
+        audio_path = video_path
+
+    try:
+        transcript_segments = transcribe_audio(audio_path)
+    finally:
+        # Cleanup temp audio unless it was the original video
+        if audio_path != video_path and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass
+
+    full_text = " ".join(seg['text'] for seg in transcript_segments)
+
+    # Detect language from first segment's word timings (or default)
+    language = "en"
+    for seg in transcript_segments:
+        if seg.get('words'):
+            language = "en"
+            break
+
     return {
-        'text': full_text.strip(),
+        'text': full_text,
         'segments': transcript_segments,
-        'language': info.language
+        'language': language,
     }
 
+def _analyze_with_gemini_native(prompt, api_key, base_url, model_name):
+    """Call Gemini using the native google-genai SDK."""
+    client = _build_gemini_client(api_key, base_url)
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt
+    )
+
+    # Cost calculation for Gemini
+    cost_analysis = None
+    try:
+        usage = response.usage_metadata
+        if usage:
+            input_price_per_million = 0.10
+            output_price_per_million = 0.40
+            prompt_tokens = usage.prompt_token_count
+            output_tokens = usage.candidates_token_count
+            input_cost = (prompt_tokens / 1_000_000) * input_price_per_million
+            output_cost = (output_tokens / 1_000_000) * output_price_per_million
+            total_cost = input_cost + output_cost
+            cost_analysis = {
+                "input_tokens": prompt_tokens,
+                "output_tokens": output_tokens,
+                "input_cost": input_cost,
+                "output_cost": output_cost,
+                "total_cost": total_cost,
+                "model": model_name,
+                "provider": "gemini"
+            }
+            print(f"💰 Token Usage ({model_name}):")
+            print(f"   - Input Tokens: {prompt_tokens} (${input_cost:.6f})")
+            print(f"   - Output Tokens: {output_tokens} (${output_cost:.6f})")
+            print(f"   - Total Estimated Cost: ${total_cost:.6f}")
+    except Exception as e:
+        print(f"⚠️ Could not calculate cost: {e}")
+
+    text = response.text
+    return text, cost_analysis
+
+
+def _analyze_with_openai_compatible(prompt, api_key, base_url, model_name):
+    """Call LLM via OpenAI-compatible /v1/chat/completions endpoint."""
+    if not base_url:
+        raise ValueError("LLM_PROVIDER=openai_compatible requires LLM_BASE_URL to be set.")
+
+    client = _OpenAI(api_key=api_key, base_url=base_url)
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an expert short-form video editor. Return only valid JSON."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.2
+    )
+
+    text = response.choices[0].message.content or ""
+    return text, None  # No cost tracking for OpenAI-compatible (would need provider-specific parsing)
+
+
+def _parse_llm_response(text, cost_analysis=None):
+    """Strip markdown code fences and parse JSON from LLM response."""
+    cleaned = text
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    elif cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+
+    try:
+        result = json.loads(cleaned)
+        if cost_analysis:
+            result["cost_analysis"] = cost_analysis
+        return result
+    except json.JSONDecodeError as e:
+        print(f"❌ Failed to parse LLM response as JSON: {e}")
+        print(f"   Raw response (first 2000 chars): {text[:2000]}")
+        raise
+
+
 def get_viral_clips(transcript_result, video_duration):
-    print("🤖  Analyzing with Gemini...")
-    
-    api_key = os.getenv("GEMINI_API_KEY")
+    """
+    Unified LLM entry point — dispatches to the configured provider
+    (gemini or openai_compatible) based on LLM_PROVIDER env var.
+    """
+    provider, api_key, base_url, model_name = get_llm_config()
+
     if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
+        print("❌ Error: Missing LLM_API_KEY / GEMINI_API_KEY.")
         return None
 
+    # Normalise provider name
+    is_gemini = provider in ("gemini", "gemini_native", "")
+    is_openai = provider in ("openai", "openai_compatible", "openai-compatible")
 
-    client = genai.Client(api_key=api_key)
-    
-    # We use gemini-2.5-flash as requested.
-    model_name = 'gemini-2.5-flash' 
-    
-    print(f"🤖  Initializing Gemini with model: {model_name}")
+    if is_gemini:
+        print(f"🤖  Analyzing with Gemini Native LLM...")
+        print(f"   provider: gemini")
+        print(f"   model: {model_name}")
+        print(f"   api_key: {_mask_key(api_key)}")
+        if base_url:
+            print(f"   base_url: {base_url}")
+    elif is_openai:
+        print(f"🤖  Analyzing with OpenAI-compatible LLM...")
+        print(f"   provider: openai_compatible")
+        print(f"   model: {model_name}")
+        print(f"   api_key: {_mask_key(api_key)}")
+        print(f"   base_url: {base_url}")
+    else:
+        print(f"⚠️  Unknown LLM_PROVIDER='{provider}', defaulting to gemini.")
+        is_gemini = True
 
     # Extract words
     words = []
@@ -824,63 +1224,20 @@ def get_viral_clips(transcript_result, video_duration):
     )
 
     try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt
-        )
-        
-        # --- Cost Calculation ---
-        try:
-            usage = response.usage_metadata
-            if usage:
-                # Gemini 2.5 Flash Pricing (Dec 2025)
-                # Input: $0.10 per 1M tokens
-                # Output: $0.40 per 1M tokens
-                
-                input_price_per_million = 0.10
-                output_price_per_million = 0.40
-                
-                prompt_tokens = usage.prompt_token_count
-                output_tokens = usage.candidates_token_count
-                
-                input_cost = (prompt_tokens / 1_000_000) * input_price_per_million
-                output_cost = (output_tokens / 1_000_000) * output_price_per_million
-                total_cost = input_cost + output_cost
-                
-                cost_analysis = {
-                    "input_tokens": prompt_tokens,
-                    "output_tokens": output_tokens,
-                    "input_cost": input_cost,
-                    "output_cost": output_cost,
-                    "total_cost": total_cost,
-                    "model": model_name
-                }
+        if is_gemini:
+            text, cost_analysis = _analyze_with_gemini_native(prompt, api_key, base_url, model_name)
+        else:
+            text, cost_analysis = _analyze_with_openai_compatible(prompt, api_key, base_url, model_name)
 
-                print(f"💰 Token Usage ({model_name}):")
-                print(f"   - Input Tokens: {prompt_tokens} (${input_cost:.6f})")
-                print(f"   - Output Tokens: {output_tokens} (${output_cost:.6f})")
-                print(f"   - Total Estimated Cost: ${total_cost:.6f}")
-                
-        except Exception as e:
-            print(f"⚠️ Could not calculate cost: {e}")
-            cost_analysis = None
-        # ------------------------
+        return _parse_llm_response(text, cost_analysis)
 
-        # Clean response if it contains markdown code blocks
-        text = response.text
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-        
-        result_json = json.loads(text)
-        if cost_analysis:
-            result_json['cost_analysis'] = cost_analysis
-            
-        return result_json
     except Exception as e:
-        print(f"❌ Gemini Error: {e}")
+        if _is_gemini_quota_error(e):
+            print(f"❌ LLM quota exhausted (429/Rate-Limit): {e}")
+            print("⚠️  LLM identify clips failed — returning quota_exhausted flag.")
+            print("   The job will fall back to short segments from transcript instead of the whole video.")
+            return {"shorts": [], "gemini_quota_exhausted": True}
+        print(f"❌ LLM Error (provider={provider}): {e}")
         return None
 
 if __name__ == '__main__':
@@ -944,7 +1301,26 @@ if __name__ == '__main__':
     if args.skip_analysis:
         print("⏩ Skipping analysis, processing entire video...")
         output_file = args.output if args.output else os.path.join(output_dir, f"{video_title}_vertical.mp4")
-        process_video_to_vertical(input_video, output_file)
+        success = process_video_to_vertical(input_video, output_file)
+        if success:
+            # Write a minimal metadata so app.py can find and serve the single clip.
+            job_id_from_dir = os.path.basename(output_dir) if output_dir != "." else video_title
+            metadata_basename = f"{job_id_from_dir}_metadata"
+            metadata_file = os.path.join(output_dir, f"{metadata_basename}.json")
+            metadata = {
+                "shorts": [{
+                    "start": 0,
+                    "end": 0,
+                    "video_title_for_youtube_short": video_title or "Full Video",
+                    "video_description_for_tiktok": "Full video converted to vertical.",
+                    "video_description_for_instagram": "Full video converted to vertical.",
+                    "viral_hook_text": ""
+                }],
+                "transcript": {"text": "", "segments": []}
+            }
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            print(f"   ✅ Saved metadata to {metadata_file}")
     else:
         # 3. Transcribe
         transcript = transcribe_video(input_video)
@@ -958,55 +1334,79 @@ if __name__ == '__main__':
 
         # 4. Gemini Analysis
         clips_data = get_viral_clips(transcript, duration)
-        
-        if not clips_data or 'shorts' not in clips_data:
+
+        if clips_data and clips_data.get('gemini_quota_exhausted'):
+            # Gemini quota hit — create short fallback clips from transcript speech segments
+            print("⚠️  Gemini quota exhausted. Creating fallback clips from transcript...")
+            fallback_clips = _make_transcript_fallback_clips(transcript, duration)
+            if not fallback_clips:
+                print("❌ Gemini quota exhausted AND no transcript speech segments found. Cannot create clips.")
+                total_time = time.time() - script_start_time
+                print(f"\n⏱️  Total execution time: {total_time:.2f}s")
+                sys.exit(1)
+            clips_data['shorts'] = fallback_clips
+            clips_data['fallback_reason'] = 'gemini_failed'
+
+        if not clips_data or 'shorts' not in clips_data or not clips_data['shorts']:
+            if clips_data and clips_data.get('gemini_quota_exhausted'):
+                print("❌ Gemini quota exhausted — skipping whole-video fallback to avoid 900s output.")
+                total_time = time.time() - script_start_time
+                print(f"\n⏱️  Total execution time: {total_time:.2f}s")
+                sys.exit(1)
             print("❌ Failed to identify clips. Converting whole video as fallback.")
             output_file = os.path.join(output_dir, f"{video_title}_vertical.mp4")
             process_video_to_vertical(input_video, output_file)
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} viral clips!")
-            
-            # Save metadata
-            clips_data['transcript'] = transcript # Save full transcript for subtitles
-            metadata_file = os.path.join(output_dir, f"{video_title}_metadata.json")
-            with open(metadata_file, 'w') as f:
-                json.dump(clips_data, f, indent=2)
-            print(f"   Saved metadata to {metadata_file}")
 
             # 5. Process each clip
+            job_id_from_dir = os.path.basename(output_dir)
             for i, clip in enumerate(clips_data['shorts']):
                 start = clip['start']
                 end = clip['end']
                 print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
                 print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
-                
-                # Cut clip
-                clip_filename = f"{video_title}_clip_{i+1}.mp4"
+
+                # Cut clip — use job_id as prefix so the filename is stable and discoverable.
+                clip_filename = f"{job_id_from_dir}_clip_{i+1}.mp4"
                 clip_temp_path = os.path.join(output_dir, f"temp_{clip_filename}")
                 clip_final_path = os.path.join(output_dir, clip_filename)
-                
+
                 # ffmpeg cut
                 # Using re-encoding for precision as requested by strict seconds
                 cut_command = [
-                    'ffmpeg', '-y', 
-                    '-ss', str(start), 
-                    '-to', str(end), 
+                    'ffmpeg', '-y',
+                    '-ss', str(start),
+                    '-to', str(end),
                     '-i', input_video,
                     '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
                     '-c:a', 'aac',
                     clip_temp_path
                 ]
                 subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                
+
                 # Process vertical
                 success = process_video_to_vertical(clip_temp_path, clip_final_path)
-                
+
                 if success:
                     print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
-                
+                    # Update shorts[i] with file location so app.py / frontend can build the URL.
+                    clips_data['shorts'][i]['filename'] = clip_filename
+                    clips_data['shorts'][i]['path'] = clip_final_path
+                    clips_data['shorts'][i]['video_url'] = f"/videos/{job_id_from_dir}/{clip_filename}"
+
                 # Clean up temp cut
                 if os.path.exists(clip_temp_path):
                     os.remove(clip_temp_path)
+
+            # Save metadata AFTER all clips are processed so it reflects actual results.
+            # Named with job_id prefix so app.py's rescue pattern can find it.
+            metadata_basename = f"{job_id_from_dir}_metadata"
+            metadata_file = os.path.join(output_dir, f"{metadata_basename}.json")
+            clips_data['transcript'] = transcript
+            with open(metadata_file, 'w') as f:
+                json.dump(clips_data, f, indent=2)
+            print(f"   ✅ Saved metadata to {metadata_file}")
 
     # Clean up original if requested
     if args.url and not args.keep_original and os.path.exists(input_video):

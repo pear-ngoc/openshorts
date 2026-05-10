@@ -135,6 +135,9 @@ const pollJob = async (jobId) => {
 
 function App() {
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
+  const [geminiBaseUrl, setGeminiBaseUrl] = useState(localStorage.getItem('gemini_base_url') || '');
+  const [llmProvider, setLlmProvider] = useState(localStorage.getItem('llm_provider') || 'gemini');
+  const [llmModel, setLlmModel] = useState(localStorage.getItem('llm_model') || '');
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -237,6 +240,30 @@ function App() {
   }, [apiKey]);
 
   useEffect(() => {
+    if (geminiBaseUrl.trim()) {
+      localStorage.setItem('gemini_base_url', geminiBaseUrl.trim());
+    } else {
+      localStorage.removeItem('gemini_base_url');
+    }
+  }, [geminiBaseUrl]);
+
+  useEffect(() => {
+    if (llmProvider) {
+      localStorage.setItem('llm_provider', llmProvider);
+    } else {
+      localStorage.removeItem('llm_provider');
+    }
+  }, [llmProvider]);
+
+  useEffect(() => {
+    if (llmModel) {
+      localStorage.setItem('llm_model', llmModel);
+    } else {
+      localStorage.removeItem('llm_model');
+    }
+  }, [llmModel]);
+
+  useEffect(() => {
     if (uploadPostKey) {
       localStorage.setItem('uploadPostKey_v3', encrypt(uploadPostKey));
     }
@@ -332,7 +359,16 @@ function App() {
 
     try {
       let body;
-      const headers = { 'X-Gemini-Key': apiKey };
+      const headers = {
+        'X-LLM-Key': apiKey,
+        'X-LLM-Provider': llmProvider,
+      };
+      if (geminiBaseUrl.trim()) {
+        headers['X-LLM-Base-Url'] = geminiBaseUrl.trim();
+      }
+      if (llmModel.trim()) {
+        headers['X-LLM-Model'] = llmModel.trim();
+      }
 
       if (data.type === 'url') {
         headers['Content-Type'] = 'application/json';
@@ -346,7 +382,7 @@ function App() {
 
       const res = await fetch(getApiUrl('/api/process'), {
         method: 'POST',
-        headers: data.type === 'url' ? headers : { 'X-Gemini-Key': apiKey },
+        headers: data.type === 'url' ? headers : { 'X-LLM-Key': apiKey, 'X-LLM-Provider': llmProvider, ...(geminiBaseUrl.trim() ? { 'X-LLM-Base-Url': geminiBaseUrl.trim() } : {}), ...(llmModel.trim() ? { 'X-LLM-Model': llmModel.trim() } : {}) },
         body
       });
 
@@ -571,7 +607,16 @@ function App() {
                   <Shield size={12} /> Privacy: keys only live in your browser (sent to backend just to process)
                 </div>
               </div>
-              <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
+              <KeyInput
+                onKeySet={setApiKey}
+                onBaseUrlSet={setGeminiBaseUrl}
+                onProviderSet={setLlmProvider}
+                onModelSet={setLlmModel}
+                savedKey={apiKey}
+                savedBaseUrl={geminiBaseUrl}
+                savedProvider={llmProvider}
+                savedModel={llmModel}
+              />
 
               <div className={`glass-panel p-6 mt-8 ${!uploadPostKey ? 'border-amber-500/30 ring-1 ring-amber-500/20' : ''}`}>
                 <div className="flex items-center justify-between mb-4">
@@ -726,7 +771,7 @@ function App() {
 
           {/* View: SaaS Shorts */}
           {activeTab === 'saasshorts' && (
-            <SaaShortsTab geminiApiKey={apiKey} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} />
+            <SaaShortsTab geminiApiKey={apiKey} geminiBaseUrl={geminiBaseUrl} llmProvider={llmProvider} llmModel={llmModel} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} />
           )}
 
           {/* View: AI Agent */}
@@ -852,7 +897,7 @@ function App() {
 
           {/* View: Thumbnails */}
           {activeTab === 'thumbnails' && (
-            <ThumbnailStudio geminiApiKey={apiKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} />
+            <ThumbnailStudio geminiApiKey={apiKey} geminiBaseUrl={geminiBaseUrl} llmProvider={llmProvider} llmModel={llmModel} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} />
           )}
 
           {/* View: Gallery */}
@@ -978,6 +1023,9 @@ function App() {
                           uploadPostKey={uploadPostKey}
                           uploadUserId={uploadUserId}
                           geminiApiKey={apiKey}
+                          geminiBaseUrl={geminiBaseUrl}
+                          llmProvider={llmProvider}
+                          llmModel={llmModel}
                           elevenLabsKey={elevenLabsKey}
                           onPlay={(time) => handleClipPlay(time)}
                           onPause={handleClipPause}

@@ -7,7 +7,15 @@ from google.genai import types
 from PIL import Image
 
 
-def analyze_video_for_titles(api_key, video_path, transcript=None):
+def _build_client(api_key, base_url=None):
+    """Build a genai.Client, optionally with a custom base URL."""
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["http_options"] = types.HttpOptions(base_url=base_url)
+    return genai.Client(**kwargs)
+
+
+def analyze_video_for_titles(api_key, video_path, transcript=None, base_url=None):
     """
     Transcribes a video and uses Gemini to suggest viral YouTube titles.
     If transcript is provided, skips Whisper transcription.
@@ -21,7 +29,7 @@ def analyze_video_for_titles(api_key, video_path, transcript=None):
         print("🎬 [Thumbnail] Using pre-computed transcript (Whisper already done)...")
 
     print("📤 [Thumbnail] Uploading video to Gemini...")
-    client = genai.Client(api_key=api_key)
+    client = _build_client(api_key, base_url)
 
     file_upload = client.files.upload(file=video_path)
     while True:
@@ -108,11 +116,11 @@ OUTPUT JSON:
         }
 
 
-def refine_titles(api_key, context, user_message, conversation_history=None):
+def refine_titles(api_key, context, user_message, conversation_history=None, base_url=None):
     """
     Takes video context + user feedback and returns refined title suggestions.
     """
-    client = genai.Client(api_key=api_key)
+    client = _build_client(api_key, base_url)
 
     history_text = ""
     if conversation_history:
@@ -171,14 +179,14 @@ OUTPUT JSON:
         return {"titles": ["Could not refine titles - please try again"]}
 
 
-def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_image_path=None, extra_prompt="", count=3, video_context=""):
+def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_image_path=None, extra_prompt="", count=3, video_context="", base_url=None):
     """
     Generates YouTube thumbnails using Gemini image generation.
     Returns list of saved image paths (relative URLs).
     """
-    client = genai.Client(api_key=api_key)
+    client = _build_client(api_key, base_url)
 
-    output_dir = os.path.join("output", "thumbnails", session_id)
+    output_dir = os.path.join(os.getenv("OUTPUT_DIR", "/app/output"), "thumbnails", session_id)
     os.makedirs(output_dir, exist_ok=True)
 
     prompt_parts = []
@@ -273,12 +281,12 @@ DESIGN REQUIREMENTS:
     return thumbnails
 
 
-def generate_youtube_description(api_key, title, transcript_segments, language, video_duration):
+def generate_youtube_description(api_key, title, transcript_segments, language, video_duration, base_url=None):
     """
     Uses Gemini to generate a YouTube description with chapter markers from transcript segments.
     Returns: { "description": "full description text with chapters" }
     """
-    client = genai.Client(api_key=api_key)
+    client = _build_client(api_key, base_url)
 
     # Format segments for the prompt
     formatted_segments = []

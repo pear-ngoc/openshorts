@@ -92,7 +92,7 @@ function DragDropZone({ label, accept, onFile, file, onClear, icon: Icon }) {
   );
 }
 
-export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUserId }) {
+export default function ThumbnailStudio({ geminiApiKey, geminiBaseUrl, llmProvider, llmModel, uploadPostKey, uploadUserId }) {
   // Step management
   const [step, setStep] = useState(0);
   const [mode, setMode] = useState(null); // 'video' or 'manual'
@@ -182,7 +182,12 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
 
       const res = await fetch(getApiUrl('/api/thumbnail/analyze'), {
         method: 'POST',
-        headers: { 'X-Gemini-Key': geminiApiKey },
+        headers: {
+          'X-LLM-Key': geminiApiKey,
+          'X-LLM-Provider': llmProvider || 'gemini',
+          ...(geminiBaseUrl?.trim() ? { 'X-LLM-Base-Url': geminiBaseUrl.trim() } : {}),
+          ...(llmModel?.trim() ? { 'X-LLM-Model': llmModel.trim() } : {}),
+        },
         body: formData
       });
 
@@ -227,7 +232,10 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Gemini-Key': geminiApiKey
+          'X-LLM-Key': geminiApiKey,
+          'X-LLM-Provider': llmProvider || 'gemini',
+          ...(geminiBaseUrl?.trim() ? { 'X-LLM-Base-Url': geminiBaseUrl.trim() } : {}),
+          ...(llmModel?.trim() ? { 'X-LLM-Model': llmModel.trim() } : {}),
         },
         body: JSON.stringify({ title: manualTitle, session_id: newSessionId })
       }).catch(() => { });
@@ -250,7 +258,10 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Gemini-Key': geminiApiKey
+          'X-LLM-Key': geminiApiKey,
+          'X-LLM-Provider': llmProvider || 'gemini',
+          ...(geminiBaseUrl?.trim() ? { 'X-LLM-Base-Url': geminiBaseUrl.trim() } : {}),
+          ...(llmModel?.trim() ? { 'X-LLM-Model': llmModel.trim() } : {}),
         },
         body: JSON.stringify({ session_id: sessionId, message: userMsg })
       });
@@ -293,7 +304,12 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
 
       const res = await fetch(getApiUrl('/api/thumbnail/generate'), {
         method: 'POST',
-        headers: { 'X-Gemini-Key': geminiApiKey },
+        headers: {
+          'X-LLM-Key': geminiApiKey,
+          'X-LLM-Provider': llmProvider || 'gemini',
+          ...(geminiBaseUrl?.trim() ? { 'X-LLM-Base-Url': geminiBaseUrl.trim() } : {}),
+          ...(llmModel?.trim() ? { 'X-LLM-Model': llmModel.trim() } : {}),
+        },
         body: formData
       });
 
@@ -345,7 +361,10 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Gemini-Key': geminiApiKey
+          'X-LLM-Key': geminiApiKey,
+          'X-LLM-Provider': llmProvider || 'gemini',
+          ...(geminiBaseUrl?.trim() ? { 'X-LLM-Base-Url': geminiBaseUrl.trim() } : {}),
+          ...(llmModel?.trim() ? { 'X-LLM-Model': llmModel.trim() } : {}),
         },
         body: JSON.stringify({ session_id: sessionId, title: finalTitle })
       });

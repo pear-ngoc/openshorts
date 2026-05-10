@@ -34,7 +34,7 @@ function saveCache(url, analysis, webResearch, scripts) {
   } catch { /* localStorage full */ }
 }
 
-export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uploadPostKey, uploadUserId }) {
+export default function SaaShortsTab({ geminiApiKey, geminiBaseUrl, llmProvider, llmModel, elevenLabsKey, falKey, uploadPostKey, uploadUserId }) {
   // Wizard state
   const [step, setStep] = useState(() => {
     const cache = loadCache();
@@ -199,7 +199,10 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Gemini-Key': geminiApiKey,
+          'X-LLM-Key': geminiApiKey,
+          'X-LLM-Provider': llmProvider || 'gemini',
+          ...(geminiBaseUrl?.trim() ? { 'X-LLM-Base-Url': geminiBaseUrl.trim() } : {}),
+          ...(llmModel?.trim() ? { 'X-LLM-Model': llmModel.trim() } : {}),
         },
         body: JSON.stringify({
           url: url.trim() || undefined,

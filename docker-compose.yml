@@ -4,11 +4,37 @@ services:
     container_name: openshorts-backend
     ports:
       - "8000:8000"
+    environment:
+      - YOLO_MODEL_PATH=/app/models/yolov8n.pt
+      - MPLCONFIGDIR=/tmp/matplotlib
+      - XDG_CACHE_HOME=/tmp/cache
+      - FONTCONFIG_FILE=/tmp/fontconfig/fonts.conf
+      - FONTCONFIG_PATH=/tmp/fontconfig
+      - HOME=/tmp
+      - UPLOAD_DIR=/app/uploads
+      - OUTPUT_DIR=/app/output
+      - OUTPUTS_DIR=/app/outputs
+      - TEMP_DIR=/app/temp
+      - CLIPS_DIR=/app/clips
+      - FONT_DIR=/app/fonts
+      - THUMBNAILS_DIR=/app/output/thumbnails
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_MODEL=${LLM_MODEL:-gemini-2.5-flash}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_BASE_URL=${GEMINI_BASE_URL:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
     volumes:
-      - .:/app
-      - /app/__pycache__
+      - ./uploads:/app/uploads
       - ./output:/app/output
+      - ./outputs:/app/outputs
+      - ./temp:/app/temp
+      - ./clips:/app/clips
+      - ./fonts:/app/fonts
     restart: unless-stopped
+    env_file:
+      - .env
 
   frontend:
     build: ./dashboard

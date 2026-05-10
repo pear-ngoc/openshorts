@@ -7,8 +7,11 @@ from google import genai
 from google.genai import types
 
 class VideoEditor:
-    def __init__(self, api_key):
-        self.client = genai.Client(api_key=api_key)
+    def __init__(self, api_key, base_url=None):
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(base_url=base_url) if base_url else None,
+        )
         self.model_name = "gemini-3-flash-preview" 
 
     def upload_video(self, video_path):

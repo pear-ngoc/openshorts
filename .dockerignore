@@ -27,29 +27,45 @@ dashboard/node_modules/
 *.swp
 *.swo
 
-# Video files (will be mounted via volume)
+# Video/Audio/Media files (will be mounted via volume)
 *.mp4
 *.avi
 *.mov
 *.mkv
 *.gif
+*.webm
+*.m4a
+*.wav
+*.mp3
 videos/
 
 # Model files (downloaded at build time)
 *.pt
 
+# Font files (downloaded at runtime)
+*.ttf
+*.otf
+
 # Docker
 Dockerfile
 docker-compose.yml
+docker-compose.dev.yml
 .dockerignore
+
+# Runtime/mounted directories (in the repo root, not /app inside container)
+uploads/
+output/
+outputs/
+temp/
+clips/
+fonts/
+
+# Cookies / secrets
+cookies.txt
 
 # Docs
 README.md
 *.md
 
-
-
-
-
-
-
+# Dev scripts (optional: if you don't want to commit helper scripts)
+# scripts/

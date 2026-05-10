@@ -19,11 +19,13 @@ from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3
 
 load_dotenv()
 
-# Constants
-UPLOAD_DIR = "uploads"
-OUTPUT_DIR = "output"
+# Constants (defaults match Dockerfile /app layout; override via env in dev)
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/app/uploads")
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/app/output")
+THUMBNAILS_DIR = os.getenv("THUMBNAILS_DIR", "/app/output/thumbnails")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(THUMBNAILS_DIR, exist_ok=True)
 
 # Configuration
 # Default to 1 if not set, but user can set higher for powerful servers
@@ -250,16 +252,26 @@ async def run_job(job_id, job_data):
                         clips = data.get('shorts', [])
                         cost_analysis = data.get('cost_analysis')
                         
-                        # Check which clips actually exist on disk
+                        # Check which clips actually exist on disk.
+                        # Prefer video_url already written by main.py; otherwise derive
+                        # from index and verify the file is present.
                         ready_clips = []
                         for i, clip in enumerate(clips):
-                             clip_filename = f"{base_name}_clip_{i+1}.mp4"
-                             clip_path = os.path.join(output_dir, clip_filename)
-                             if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
-                                 # Checking if file is growing? For now assume if it exists and main.py moves it there, it's done.
-                                 # main.py writes to temp_... then moves to final name. So presence means ready!
-                                 clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
-                                 ready_clips.append(clip)
+                            # main.py writes video_url after each clip; trust it when present.
+                            video_url = clip.get('video_url')
+                            if video_url:
+                                # Extract filename to verify the file exists before exposing the URL.
+                                filename = os.path.basename(video_url)
+                                clip_path = os.path.join(output_dir, filename)
+                                if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
+                                    ready_clips.append(clip)
+                                # If file not found, fall through to index-based check below.
+                            # Index-based fallback: derive the expected filename and verify.
+                            clip_filename = f"{base_name}_clip_{i+1}.mp4"
+                            clip_path = os.path.join(output_dir, clip_filename)
+                            if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
+                                clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+                                ready_clips.append(clip)
                         
                         if ready_clips:
                              jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
@@ -284,23 +296,64 @@ async def run_job(job_id, job_data):
                 if _relocate_root_job_artifacts(job_id, output_dir):
                     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
             if json_files:
-                target_json = json_files[0] 
+                target_json = json_files[0]
                 with open(target_json, 'r') as f:
                     data = json.load(f)
-                
+
                 # Enhance result with video URLs
                 base_name = os.path.basename(target_json).replace('_metadata.json', '')
                 clips = data.get('shorts', [])
                 cost_analysis = data.get('cost_analysis')
 
                 for i, clip in enumerate(clips):
-                     clip_filename = f"{base_name}_clip_{i+1}.mp4"
-                     clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
-                
+                    # main.py writes video_url; use it directly if the file exists.
+                    video_url = clip.get('video_url')
+                    if video_url:
+                        filename = os.path.basename(video_url)
+                        clip_path = os.path.join(output_dir, filename)
+                        if os.path.exists(clip_path):
+                            clip['video_url'] = f"/videos/{job_id}/{filename}"
+                        else:
+                            # File referenced in metadata is gone; derive from index and verify.
+                            clip_filename = f"{base_name}_clip_{i+1}.mp4"
+                            clip_path = os.path.join(output_dir, clip_filename)
+                            if os.path.exists(clip_path):
+                                clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+                    else:
+                        # No video_url in metadata — derive from index and verify.
+                        clip_filename = f"{base_name}_clip_{i+1}.mp4"
+                        clip_path = os.path.join(output_dir, clip_filename)
+                        if os.path.exists(clip_path):
+                            clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+
                 jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
             else:
-                 jobs[job_id]['status'] = 'failed'
-                 jobs[job_id]['logs'].append("No metadata file generated.")
+                # Fallback: no metadata.json found. Check if mp4 files exist and
+                # generate a minimal metadata so the job is still marked completed.
+                mp4_files = sorted(glob.glob(os.path.join(output_dir, "*_clip_*.mp4")))
+                if mp4_files:
+                    fallback_clips = []
+                    for mp4_path in mp4_files:
+                        basename = os.path.basename(mp4_path)
+                        fallback_clips.append({
+                            "start": 0,
+                            "end": 0,
+                            "video_title_for_youtube_short": basename.replace(".mp4", ""),
+                            "video_description_for_tiktok": "Clip generated by OpenShorts.",
+                            "video_description_for_instagram": "Clip generated by OpenShorts.",
+                            "viral_hook_text": "",
+                            "video_url": f"/videos/{job_id}/{basename}"
+                        })
+                    jobs[job_id]['result'] = {
+                        'clips': fallback_clips,
+                        'cost_analysis': None
+                    }
+                    jobs[job_id]['logs'].append(
+                        f"Metadata missing; generated fallback metadata from {len(fallback_clips)} output mp4 file(s)."
+                    )
+                else:
+                    jobs[job_id]['status'] = 'failed'
+                    jobs[job_id]['logs'].append("No metadata file generated and no mp4 files found.")
         else:
             jobs[job_id]['status'] = 'failed'
             jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
@@ -308,6 +361,59 @@ async def run_job(job_id, job_data):
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
+
+# ─── Helper: resolve LLM config from request headers ──────────────────────
+def _resolve_llm_headers(request) -> dict:
+    """
+    Extract LLM config from request headers.
+    Supports both new X-LLM-* headers and legacy X-Gemini-* headers for backward compat.
+    """
+    # New-style headers (priority)
+    provider = request.headers.get("X-LLM-Provider") or ""
+    api_key = request.headers.get("X-LLM-Key") or ""
+    base_url = request.headers.get("X-LLM-Base-Url") or ""
+    model = request.headers.get("X-LLM-Model") or ""
+
+    # Legacy headers — map to LLM fields if not already set
+    if not api_key:
+        api_key = request.headers.get("X-Gemini-Key") or ""
+    if not base_url:
+        legacy_base = request.headers.get("X-Gemini-Base-Url") or ""
+        if legacy_base:
+            base_url = legacy_base
+
+    return {
+        "provider": provider.strip() if provider else "",
+        "api_key": api_key.strip() if api_key else "",
+        "base_url": base_url.strip() if base_url else "",
+        "model": model.strip() if model else "",
+    }
+
+
+def _build_llm_env(llm_headers: dict) -> dict:
+    """
+    Build env dict for subprocess from resolved LLM headers.
+    Respects priority: explicit header > .env > legacy fallback.
+    """
+    env = os.environ.copy()
+
+    # Remove any previously-set LLM vars to avoid leakage
+    for key in ["LLM_PROVIDER", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"]:
+        if key in env:
+            del env[key]
+
+    # Set from headers if provided
+    if llm_headers.get("provider"):
+        env["LLM_PROVIDER"] = llm_headers["provider"]
+    if llm_headers.get("api_key"):
+        env["LLM_API_KEY"] = llm_headers["api_key"]
+    if llm_headers.get("base_url"):
+        env["LLM_BASE_URL"] = llm_headers["base_url"]
+    if llm_headers.get("model"):
+        env["LLM_MODEL"] = llm_headers["model"]
+
+    return env
+
 
 @app.get("/api/config")
 async def get_config():
@@ -320,9 +426,9 @@ async def process_endpoint(
     url: Optional[str] = Form(None),
     acknowledged: Optional[str] = Form(None)
 ):
-    api_key = request.headers.get("X-Gemini-Key")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+    llm = _resolve_llm_headers(request)
+    if not llm["api_key"]:
+        raise HTTPException(status_code=400, detail="Missing API key header (X-LLM-Key or X-Gemini-Key)")
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
 
@@ -362,8 +468,7 @@ async def process_endpoint(
 
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
-    env = os.environ.copy()
-    env["GEMINI_API_KEY"] = api_key # Override with key from request
+    env = _build_llm_env(llm)
 
     if url:
         cmd.extend(["-u", url])
@@ -431,13 +536,23 @@ class EditRequest(BaseModel):
 @app.post("/api/edit")
 async def edit_clip(
     req: EditRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_llm_key: Optional[str] = Header(None, alias="X-LLM-Key"),
+    x_llm_base_url: Optional[str] = Header(None, alias="X-LLM-Base-Url"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias="X-Gemini-Base-Url")
 ):
-    # Determine API Key
-    final_api_key = req.api_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
-    
+    final_api_key = req.api_key or x_llm_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
+
     if not final_api_key:
-        raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header or Body)")
+        raise HTTPException(status_code=400, detail="Missing API key")
+
+    gemini_base_url = None
+    if x_llm_base_url:
+        gemini_base_url = x_llm_base_url.strip()
+    elif x_gemini_base_url:
+        gemini_base_url = x_gemini_base_url.strip()
+    elif os.environ.get("GEMINI_BASE_URL"):
+        gemini_base_url = os.environ.get("GEMINI_BASE_URL")
 
     if req.job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -469,7 +584,7 @@ async def edit_clip(
         # Run editing in a thread to avoid blocking main loop
         # Since VideoEditor uses blocking calls (subprocess, API wait)
         def run_edit():
-            editor = VideoEditor(api_key=final_api_key)
+            editor = VideoEditor(api_key=final_api_key, base_url=gemini_base_url)
             
             # SAFE FILE RENAMING STRATEGY (Avoid UnicodeEncodeError in Docker)
             # Create a safe ASCII filename in the same directory
@@ -647,13 +762,23 @@ class EffectsGenerateRequest(BaseModel):
 @app.post("/api/effects/generate")
 async def generate_effects_config(
     req: EffectsGenerateRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_llm_key: Optional[str] = Header(None, alias="X-LLM-Key"),
+    x_llm_base_url: Optional[str] = Header(None, alias="X-LLM-Base-Url"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias="X-Gemini-Base-Url")
 ):
-    """Generate structured EffectsConfig JSON for Remotion rendering via Gemini AI."""
-    final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    final_api_key = x_llm_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
 
     if not final_api_key:
-        raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header)")
+        raise HTTPException(status_code=400, detail="Missing API key")
+
+    gemini_base_url = None
+    if x_llm_base_url:
+        gemini_base_url = x_llm_base_url.strip()
+    elif x_gemini_base_url:
+        gemini_base_url = x_gemini_base_url.strip()
+    elif os.environ.get("GEMINI_BASE_URL"):
+        gemini_base_url = os.environ.get("GEMINI_BASE_URL")
 
     if req.job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -676,7 +801,7 @@ async def generate_effects_config(
             raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
 
         def run_effects_generation():
-            editor = VideoEditor(api_key=final_api_key)
+            editor = VideoEditor(api_key=final_api_key, base_url=gemini_base_url)
 
             # Create safe ASCII filename to avoid encoding issues
             safe_filename = f"temp_effects_{req.job_id}.mp4"
@@ -1273,12 +1398,23 @@ async def thumbnail_analyze(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_llm_key: Optional[str] = Header(None, alias="X-LLM-Key"),
+    x_llm_base_url: Optional[str] = Header(None, alias="X-LLM-Base-Url"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias="X-Gemini-Base-Url")
 ):
     """Analyze a video and suggest viral YouTube titles."""
-    api_key = x_gemini_key
+    api_key = x_llm_key or x_gemini_key
     if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+        raise HTTPException(status_code=400, detail="Missing API key header")
+
+    gemini_base_url = None
+    if x_llm_base_url:
+        gemini_base_url = x_llm_base_url.strip()
+    elif x_gemini_base_url:
+        gemini_base_url = x_gemini_base_url.strip()
+    elif os.environ.get("GEMINI_BASE_URL"):
+        gemini_base_url = os.environ.get("GEMINI_BASE_URL")
 
     pre_transcript = None
 
@@ -1320,7 +1456,7 @@ async def thumbnail_analyze(
     try:
         # Run analysis in thread pool (skips Whisper if pre_transcript is available)
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, analyze_video_for_titles, api_key, video_path, pre_transcript)
+        result = await loop.run_in_executor(None, analyze_video_for_titles, api_key, video_path, pre_transcript, gemini_base_url)
 
         # Store/update session context
         if session_id not in thumbnail_sessions:
@@ -1357,12 +1493,22 @@ class ThumbnailTitlesRequest(BaseModel):
 @app.post("/api/thumbnail/titles")
 async def thumbnail_titles(
     req: ThumbnailTitlesRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_llm_key: Optional[str] = Header(None, alias="X-LLM-Key"),
+    x_llm_base_url: Optional[str] = Header(None, alias="X-LLM-Base-Url"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias="X-Gemini-Base-Url")
 ):
-    """Refine title suggestions or accept a manual title."""
-    api_key = x_gemini_key
+    api_key = x_llm_key or x_gemini_key
     if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+        raise HTTPException(status_code=400, detail="Missing API key")
+
+    gemini_base_url = None
+    if x_llm_base_url:
+        gemini_base_url = x_llm_base_url.strip()
+    elif x_gemini_base_url:
+        gemini_base_url = x_gemini_base_url.strip()
+    elif os.environ.get("GEMINI_BASE_URL"):
+        gemini_base_url = os.environ.get("GEMINI_BASE_URL")
 
     # Manual title mode - just create a session with the user's title
     if req.title:
@@ -1396,7 +1542,8 @@ async def thumbnail_titles(
             api_key,
             session["context"],
             req.message,
-            session["conversation"]
+            session["conversation"],
+            gemini_base_url
         )
 
         new_titles = result.get("titles", [])
@@ -1419,12 +1566,23 @@ async def thumbnail_generate(
     count: int = Form(3),
     face: Optional[UploadFile] = File(None),
     background: Optional[UploadFile] = File(None),
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_llm_key: Optional[str] = Header(None, alias="X-LLM-Key"),
+    x_llm_base_url: Optional[str] = Header(None, alias="X-LLM-Base-Url"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias="X-Gemini-Base-Url")
 ):
     """Generate YouTube thumbnails with Gemini image generation."""
-    api_key = x_gemini_key
+    api_key = x_llm_key or x_gemini_key
     if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+        raise HTTPException(status_code=400, detail="Missing API key")
+
+    gemini_base_url = None
+    if x_llm_base_url:
+        gemini_base_url = x_llm_base_url.strip()
+    elif x_gemini_base_url:
+        gemini_base_url = x_gemini_base_url.strip()
+    elif os.environ.get("GEMINI_BASE_URL"):
+        gemini_base_url = os.environ.get("GEMINI_BASE_URL")
 
     # Clamp count
     count = min(max(1, count), 6)
@@ -1463,7 +1621,8 @@ async def thumbnail_generate(
             bg_path,
             extra_prompt,
             count,
-            video_context
+            video_context,
+            gemini_base_url
         )
 
         if not thumbnails:
@@ -1485,12 +1644,23 @@ class ThumbnailDescribeRequest(BaseModel):
 @app.post("/api/thumbnail/describe")
 async def thumbnail_describe(
     req: ThumbnailDescribeRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_llm_key: Optional[str] = Header(None, alias="X-LLM-Key"),
+    x_llm_base_url: Optional[str] = Header(None, alias="X-LLM-Base-Url"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias="X-Gemini-Base-Url")
 ):
     """Generate a YouTube description with chapters from the transcript."""
-    api_key = x_gemini_key
+    api_key = x_llm_key or x_gemini_key
     if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+        raise HTTPException(status_code=400, detail="Missing API key")
+
+    gemini_base_url = None
+    if x_llm_base_url:
+        gemini_base_url = x_llm_base_url.strip()
+    elif x_gemini_base_url:
+        gemini_base_url = x_gemini_base_url.strip()
+    elif os.environ.get("GEMINI_BASE_URL"):
+        gemini_base_url = os.environ.get("GEMINI_BASE_URL")
 
     if req.session_id not in thumbnail_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1509,7 +1679,8 @@ async def thumbnail_describe(
             req.title,
             segments,
             session.get("language", "en"),
-            session.get("video_duration", 0)
+            session.get("video_duration", 0),
+            gemini_base_url
         )
         return {"description": result.get("description", "")}
 
@@ -1670,12 +1841,22 @@ class SaaSAnalyzeRequest(BaseModel):
 @app.post("/api/saasshorts/analyze")
 async def saasshorts_analyze(
     req: SaaSAnalyzeRequest,
+    x_llm_key: Optional[str] = Header(None, alias="X-LLM-Key"),
+    x_llm_base_url: Optional[str] = Header(None, alias="X-LLM-Base-Url"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias="X-Gemini-Base-Url"),
 ):
-    """Analyze a URL or manual description and generate video scripts."""
-    gemini_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    gemini_key = x_llm_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
     if not gemini_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key")
+
+    gemini_base_url = None
+    if x_llm_base_url:
+        gemini_base_url = x_llm_base_url.strip()
+    elif x_gemini_base_url:
+        gemini_base_url = x_gemini_base_url.strip()
+    elif os.environ.get("GEMINI_BASE_URL"):
+        gemini_base_url = os.environ.get("GEMINI_BASE_URL")
 
     if not req.url and not req.description:
         raise HTTPException(status_code=400, detail="Provide a URL or a product description")
@@ -1689,8 +1870,8 @@ async def saasshorts_analyze(
             if req.url and req.url.strip():
                 # URL provided: full scrape + research pipeline
                 scraped = scrape_website(req.url)
-                web_research = research_saas_online(req.url, gemini_key)
-                analysis = analyze_saas(scraped, gemini_key, web_research=web_research)
+                web_research = research_saas_online(req.url, gemini_key, gemini_base_url)
+                analysis = analyze_saas(scraped, gemini_key, web_research=web_research, gemini_base_url=gemini_base_url)
             else:
                 # Manual description: build analysis from description
                 analysis = {
@@ -1703,7 +1884,7 @@ async def saasshorts_analyze(
                     "tone": "casual and authentic",
                 }
 
-            scripts = generate_scripts(analysis, gemini_key, req.num_scripts, req.style, req.language, req.actor_gender)
+            scripts = generate_scripts(analysis, gemini_key, req.num_scripts, req.style, req.language, req.actor_gender, gemini_base_url)
             return {
                 "analysis": analysis,
                 "scripts": scripts,

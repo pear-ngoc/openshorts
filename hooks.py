@@ -5,7 +5,7 @@ import urllib.request
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSerif/NotoSerif-Bold.ttf"
-FONT_DIR = "fonts"
+FONT_DIR = os.getenv("FONT_DIR", "/app/fonts")
 FONT_PATH = os.path.join(FONT_DIR, "NotoSerif-Bold.ttf")
 
 def download_font_if_needed():

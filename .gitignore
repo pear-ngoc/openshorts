@@ -18,6 +18,7 @@ uploads/
 downloads/
 videos/
 output/
+outputs/
 
 # OS / IDE
 .DS_Store
@@ -40,3 +41,8 @@ output/
 skills/
 skills-lock.json
 
+
+# Core dumps
+core
+core.*
+*.core

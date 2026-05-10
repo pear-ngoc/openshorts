@@ -1,0 +1,76 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    nodejs \
+    fontconfig \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+
+RUN pip install --upgrade pip
+
+# Cài torch CPU-only trước để tránh kéo NVIDIA/CUDA 2-3GB
+RUN pip install --no-cache-dir \
+    torch torchvision \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Dependency nặng dùng cho video/AI
+RUN pip install --no-cache-dir \
+    ultralytics \
+    opencv-python \
+    opencv-contrib-python \
+    mediapipe \
+    faster-whisper \
+    ctranslate2 \
+    onnxruntime \
+    numpy \
+    scipy \
+    matplotlib \
+    pillow \
+    av \
+    yt-dlp \
+    google-genai \
+    openai \
+    python-dotenv \
+    fastapi \
+    uvicorn \
+    python-multipart \
+    boto3 \
+    requests
+
+RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
+
+RUN mkdir -p \
+    /app/models \
+    /app/uploads \
+    /app/output/thumbnails \
+    /app/outputs \
+    /app/temp \
+    /app/clips \
+    /tmp/matplotlib \
+    /tmp/cache \
+    /tmp/Ultralytics \
+    && chown -R appuser:appuser /app /tmp/matplotlib /tmp/cache /tmp/Ultralytics /opt/venv
+
+ENV YOLO_MODEL_PATH=/app/models/yolov8n.pt
+ENV MPLCONFIGDIR=/tmp/matplotlib
+ENV XDG_CACHE_HOME=/tmp/cache
+ENV ULTRALYTICS_CONFIG_DIR=/tmp/Ultralytics
+
+# Preload YOLO model vào base image
+RUN python -c "from ultralytics import YOLO; YOLO('/app/models/yolov8n.pt')" \
+    && chown appuser:appuser /app/models/yolov8n.pt \
+    && chmod 644 /app/models/yolov8n.pt
+
+USER appuser

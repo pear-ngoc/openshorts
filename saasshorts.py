@@ -21,6 +21,28 @@ import httpx
 from urllib.parse import urljoin
 from typing import Optional, List, Dict, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from google import genai
+from google.genai import types
+
+
+def _build_client(api_key, base_url=None):
+    """Build a genai.Client, optionally with a custom base URL."""
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["http_options"] = types.HttpOptions(base_url=base_url)
+    return genai.Client(**kwargs)
+
+
+def get_llm_config():
+    """
+    Returns (provider, api_key, base_url, model) from environment.
+    Supports both new LLM_* vars and legacy GEMINI_* vars for backward compat.
+    """
+    provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")
+    base_url = os.getenv("LLM_BASE_URL") or os.getenv("GEMINI_BASE_URL") or ""
+    model = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-3-flash-preview"
+    return provider, api_key, base_url, model
 
 
 ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1"
@@ -44,18 +66,15 @@ GEMINI_MODEL = "gemini-3-flash-preview"
 # Phase 1: Website Scraping, Web Research & Analysis
 # ═══════════════════════════════════════════════════════════════════════
 
-def research_saas_online(url: str, gemini_key: str) -> dict:
+def research_saas_online(url: str, gemini_key: str, gemini_base_url: str = None) -> dict:
     """
     Use Gemini with Google Search grounding to deeply research a SaaS product
     across the internet: reviews, Reddit threads, Twitter, competitor comparisons,
     pricing complaints, user testimonials, etc.
     """
-    from google import genai
-    from google.genai import types
-
     print(f"[SaaSShorts] 🔍 Researching {url} across the web (Google Search grounding)...")
 
-    client = genai.Client(api_key=gemini_key)
+    client = _build_client(gemini_key, gemini_base_url)
 
     # Extract domain name for search queries
     domain = url.replace("https://", "").replace("http://", "").split("/")[0]
@@ -236,17 +255,14 @@ def scrape_website(url: str) -> dict:
     return result
 
 
-def analyze_saas(scraped_data: dict, gemini_key: str, web_research: dict = None) -> dict:
+def analyze_saas(scraped_data: dict, gemini_key: str, web_research: dict = None, gemini_base_url: str = None) -> dict:
     """
     Deep analysis of a SaaS product combining website scraping + web research.
     Uses Gemini 3 Flash for synthesis.
     """
-    from google import genai
-    from google.genai import types
-
     print(f"[SaaSShorts] 🧠 Analyzing {scraped_data['url']} (with web research)...")
 
-    client = genai.Client(api_key=gemini_key)
+    client = _build_client(gemini_key, gemini_base_url)
 
     # Build web research context
     research_context = ""
@@ -372,15 +388,13 @@ def generate_scripts(
     style: str = "ugc",
     language: str = "en",
     actor_gender: str = "female",
+    gemini_base_url: str = None,
 ) -> list:
     """Generate video scripts based on SaaS analysis."""
-    from google import genai
-    from google.genai import types
+    client = _build_client(gemini_key, gemini_base_url)
 
     lang_name = "Spanish" if language == "es" else "English"
     print(f"[SaaSShorts] 📝 Generating {num_scripts} scripts ({style}, {lang_name})...")
-
-    client = genai.Client(api_key=gemini_key)
 
     style_guide = {
         "ugc": "Natural, authentic UGC style. Person talking to camera like sharing a discovery with a friend. Casual, genuine.",

@@ -1,7 +1,7 @@
 services:
   backend:
     image: tuna99/openshorts-backend-dev
-    container_name: tuna99/openshorts-backend
+    container_name: openshorts-backend
     ports:
       - "8000:8000"
     volumes:
@@ -36,7 +36,7 @@ services:
 
   frontend:
     image: tuna99/openshorts-frontend
-    container_name: tuna99/openshorts-frontend
+    container_name: openshorts-frontend
     ports:
       - "5175:5173"
     volumes:
@@ -48,7 +48,7 @@ services:
 
   renderer:
     image: tuna99/openshorts-renderer
-    container_name: tuna99/openshorts-renderer
+    container_name: openshorts-renderer
     ports:
       - "3100:3100"
     volumes:

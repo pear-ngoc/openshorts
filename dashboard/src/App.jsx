@@ -1016,7 +1016,7 @@ function App() {
                     <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
                       {results.clips.map((clip, i) => (
                         <ResultCard
-                          key={i}
+                          key={`${jobId}-${i}-${clip.video_url || clip.title || i}`}
                           clip={clip}
                           index={i}
                           jobId={jobId}

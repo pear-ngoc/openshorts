@@ -1,6 +1,6 @@
 services:
   backend:
-    image: openshorts-backend-dev:latest
+    image: tuna99/openshorts-backend-dev:latest
     volumes:
       - .:/app
       - backend_models:/app/models

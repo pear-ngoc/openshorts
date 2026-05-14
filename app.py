@@ -538,6 +538,7 @@ async def edit_clip(
     req: EditRequest,
     x_llm_key: Optional[str] = Header(None, alias="X-LLM-Key"),
     x_llm_base_url: Optional[str] = Header(None, alias="X-LLM-Base-Url"),
+    x_llm_model: Optional[str] = Header(None, alias="X-LLM-Model"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     x_gemini_base_url: Optional[str] = Header(None, alias="X-Gemini-Base-Url")
 ):
@@ -584,7 +585,7 @@ async def edit_clip(
         # Run editing in a thread to avoid blocking main loop
         # Since VideoEditor uses blocking calls (subprocess, API wait)
         def run_edit():
-            editor = VideoEditor(api_key=final_api_key, base_url=gemini_base_url)
+            editor = VideoEditor(api_key=final_api_key, base_url=gemini_base_url, model_name=x_llm_model)
             
             # SAFE FILE RENAMING STRATEGY (Avoid UnicodeEncodeError in Docker)
             # Create a safe ASCII filename in the same directory
@@ -764,6 +765,7 @@ async def generate_effects_config(
     req: EffectsGenerateRequest,
     x_llm_key: Optional[str] = Header(None, alias="X-LLM-Key"),
     x_llm_base_url: Optional[str] = Header(None, alias="X-LLM-Base-Url"),
+    x_llm_model: Optional[str] = Header(None, alias="X-LLM-Model"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     x_gemini_base_url: Optional[str] = Header(None, alias="X-Gemini-Base-Url")
 ):
@@ -801,7 +803,7 @@ async def generate_effects_config(
             raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
 
         def run_effects_generation():
-            editor = VideoEditor(api_key=final_api_key, base_url=gemini_base_url)
+            editor = VideoEditor(api_key=final_api_key, base_url=gemini_base_url, model_name=x_llm_model)
 
             # Create safe ASCII filename to avoid encoding issues
             safe_filename = f"temp_effects_{req.job_id}.mp4"

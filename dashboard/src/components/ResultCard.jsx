@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock, Languages } from 'lucide-react';
 import { getApiUrl } from '../config';
 import SubtitleModal from './SubtitleModal';
@@ -9,9 +9,39 @@ import { renderInBrowser } from '../lib/renderInBrowser';
 export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, geminiBaseUrl, llmProvider, llmModel, elevenLabsKey, onPlay, onPause }) {
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
-    const videoRef = React.useRef(null);
-    const originalVideoUrl = getApiUrl(clip.video_url); // Never changes — used for Remotion previews
+    const videoRef = useRef(null);
+
+    // Derived from the clip prop so it stays in sync during polling updates.
+    // user actions (edit/subtitle/hook/translate) overwrite this via setCurrentVideoUrl.
+    const [originalVideoUrl, setOriginalVideoUrl] = useState(getApiUrl(clip.video_url));
     const [currentVideoUrl, setCurrentVideoUrl] = useState(originalVideoUrl);
+
+    // Sync originalVideoUrl when the clip prop changes (e.g., polling update).
+    // Does NOT reset currentVideoUrl here; the separate effect below handles loading.
+    useEffect(() => {
+        const newUrl = getApiUrl(clip.video_url);
+        if (newUrl !== originalVideoUrl) {
+            setOriginalVideoUrl(newUrl);
+            setCurrentVideoUrl(newUrl);
+        }
+    }, [clip.video_url]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Reload the video element whenever currentVideoUrl changes.
+    // Actions set currentVideoUrl to a blob/edited URL; polling sets it back to originalVideoUrl.
+    useEffect(() => {
+        if (videoRef.current) {
+            videoRef.current.load();
+        }
+    }, [currentVideoUrl]);
+
+    // Accumulate Remotion layers across operations
+    const [activeLayers, setActiveLayers] = useState({ subtitles: null, hook: null, effects: null });
+
+    // Reset Remotion layers when the base clip changes, since those layers
+    // are tied to the original source video.
+    useEffect(() => {
+        setActiveLayers({ subtitles: null, hook: null, effects: null });
+    }, [originalVideoUrl]);
 
     const [platforms, setPlatforms] = useState({
         tiktok: true,
@@ -36,9 +66,6 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
     const [clipDuration, setClipDuration] = useState(clip.end && clip.start ? clip.end - clip.start : 30);
 
-    // Accumulate Remotion layers across operations
-    const [activeLayers, setActiveLayers] = useState({ subtitles: null, hook: null, effects: null });
-
     // Fetch clip duration from transcript endpoint
     useEffect(() => {
         if (!jobId || index === undefined) return;
@@ -62,19 +89,24 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     }, [showModal, clip]);
 
     const handleAutoEdit = async () => {
+        console.log('[AutoEdit] Button clicked, starting...');
         setIsEditing(true);
         setEditError(null);
         try {
+            console.log('[AutoEdit] Getting API credentials...');
             const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
             const baseUrl = geminiBaseUrl || localStorage.getItem('gemini_base_url');
             const provider = llmProvider || localStorage.getItem('llm_provider') || 'gemini';
             const model = llmModel || localStorage.getItem('llm_model') || '';
+
+            console.log('[AutoEdit] apiKey:', !!apiKey, 'baseUrl:', baseUrl, 'provider:', provider, 'model:', model);
 
             if (!apiKey) {
                 throw new Error("Gemini API Key is missing. Please set it in Settings.");
             }
 
             // Try Remotion effects endpoint first
+            console.log('[AutoEdit] Calling /api/effects/generate...');
             const effectsRes = await fetch(getApiUrl('/api/effects/generate'), {
                 method: 'POST',
                 headers: {
@@ -90,10 +122,13 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     input_filename: currentVideoUrl.split('/').pop()
                 })
             });
+            console.log('[AutoEdit] /api/effects/generate response:', effectsRes.status, effectsRes.statusText);
 
             if (effectsRes.ok) {
                 const data = await effectsRes.json();
+                console.log('[AutoEdit] effects data:', JSON.stringify(data));
                 if (data.effects && data.effects.segments) {
+                    console.log('[AutoEdit] Got segments, rendering in browser...');
                     const newLayers = { ...activeLayers, effects: data.effects };
                     setActiveLayers(newLayers);
                     const blobUrl = await renderInBrowser({
@@ -103,10 +138,15 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         hook: newLayers.hook,
                         effects: newLayers.effects,
                     });
+                    console.log('[AutoEdit] Render complete, blob URL:', blobUrl);
                     setCurrentVideoUrl(blobUrl);
                     if (videoRef.current) videoRef.current.load();
                     return;
+                } else {
+                    console.log('[AutoEdit] No segments in response, falling back to FFmpeg edit');
                 }
+            } else {
+                console.log('[AutoEdit] Effects API not OK, falling back to FFmpeg edit');
             }
 
             // Fallback: legacy FFmpeg edit endpoint
@@ -145,6 +185,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             }
 
         } catch (e) {
+            console.error('[AutoEdit] Final catch block error:', e);
             setEditError(e.message);
             setTimeout(() => setEditError(null), 5000);
         } finally {

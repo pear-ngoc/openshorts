@@ -573,7 +573,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ job_id: jobId, clip_index: index })
                                 }).catch(() => {});
-                                setTLResult({ success: true, msg: 'Downloaded! Sent to TL.' });
+                                setTLResult({ success: true, msg: 'Downloaded!' });
                             } catch (err) {
                                 console.error('Download error:', err);
                                 window.open(currentVideoUrl, '_blank');

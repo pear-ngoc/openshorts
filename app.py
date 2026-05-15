@@ -492,7 +492,6 @@ def _handle_tl_job(url: str, source: str = "tl") -> Optional[str]:
     model = os.getenv("LLM_MODEL") or ""
 
     if not api_key:
-        print("Cannot create TL job: no LLM API key configured.")
         tl_service.notify_job_failed("", "LLM API key not configured on server. Cannot process jobs.", source)
         return None
 
@@ -1054,7 +1053,7 @@ async def send_clip_to_tl(req: SendTLRequest):
         )
 
     threading.Thread(target=_do_send, daemon=True).start()
-    return {"success": True, "message": "Clip sent to TL"}
+    return {"success": True, "message": "OK"}
 
 
 @app.delete("/api/jobs/{job_id}")

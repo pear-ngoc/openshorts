@@ -1,6 +1,8 @@
 services:
   backend:
-    image: tuna99/openshorts-backend-dev
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: openshorts-backend
     ports:
       - "8000:8000"
@@ -35,7 +37,9 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: tuna99/openshorts-frontend
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
     container_name: openshorts-frontend
     ports:
       - "5175:5173"
@@ -47,7 +51,9 @@ services:
       - backend
 
   renderer:
-    image: tuna99/openshorts-renderer
+    build:
+      context: .
+      dockerfile: render-service/Dockerfile
     container_name: openshorts-renderer
     ports:
       - "3100:3100"

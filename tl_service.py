@@ -58,13 +58,12 @@ def _post(endpoint: str, data: Optional[dict] = None, files: Optional[dict] = No
             resp.raise_for_status()
             result = resp.json()
             if not result.get("ok"):
-                print(f"[TL] API error: {result}")
                 return None
             return result.get("result")
-    except httpx.HTTPStatusError as e:
-        print(f"[TL] HTTP {e.response.status_code}: {e.response.text}")
-    except Exception as e:
-        print(f"[TL] Request failed: {e}")
+    except httpx.HTTPStatusError:
+        pass
+    except Exception:
+        pass
     return None
 
 
@@ -176,9 +175,7 @@ def send_code_block(title: str, raw_text: str, job_id: str) -> bool:
             escaped_body = _escape_md(body)
             msg = _send_message(escaped_body, parse_mode="MarkdownV2")
             return msg is not None
-    except Exception as e:
-        print(f"[TL] send_code_block failed: {e}")
-        # Fallback: send as-is
+    except Exception:
         return _send_split(header + body, parse_mode="Markdown")
 
 
@@ -190,7 +187,6 @@ def send_video(file_path: str, caption: str) -> bool:
     if not _is_configured():
         return False
     if not os.path.exists(file_path):
-        print(f"[TL] send_video: file not found: {file_path}")
         return False
 
     try:
@@ -207,13 +203,10 @@ def send_video(file_path: str, caption: str) -> bool:
                 resp.raise_for_status()
                 result = resp.json()
                 if not result.get("ok"):
-                    print(f"[TL] sendVideo error: {result}")
                     return False
                 return True
-    except httpx.HTTPStatusError as e:
-        print(f"[TL] sendVideo HTTP {e.response.status_code}: {e.response.text}")
-    except Exception as e:
-        print(f"[TL] sendVideo failed: {e}")
+    except Exception:
+        pass
     return False
 
 
@@ -222,7 +215,6 @@ def send_document(file_path: str, caption: str) -> bool:
     if not _is_configured():
         return False
     if not os.path.exists(file_path):
-        print(f"[TL] send_document: file not found: {file_path}")
         return False
 
     try:
@@ -238,8 +230,8 @@ def send_document(file_path: str, caption: str) -> bool:
                 resp.raise_for_status()
                 result = resp.json()
                 return result.get("ok", False)
-    except Exception as e:
-        print(f"[TL] send_document failed: {e}")
+    except Exception:
+        pass
     return False
 
 
@@ -258,8 +250,6 @@ def notify_job_submitted(job_id: str, url: str, source: str, youtube_title: str 
             f"`Status:` queued"
         )
         _send_message(text, parse_mode="Markdown")
-        # Log locally
-        print(f"[TL] Job submitted notification sent for {job_id} (source={source})")
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -278,20 +268,77 @@ def notify_step(job_id: str, step_name: str, details: str = "") -> None:
     threading.Thread(target=_bg, daemon=True).start()
 
 
-def notify_gemini_response(job_id: str, raw_response: str) -> None:
-    """Send the raw Gemini/AI response in a code block. Runs async."""
+def notify_transcription_result(job_id: str, transcript: dict) -> None:
+    """
+    Send a transcription result summary after transcription completes.
+    Shows language, segment count, total duration, and a text preview.
+    Runs async.
+    """
     def _bg():
+        lang = transcript.get("language", "unknown")
+        segments = transcript.get("segments", [])
+        segment_count = len(segments)
+        full_text = transcript.get("text", "").strip()
+
+        duration = 0.0
+        if segments:
+            try:
+                duration = float(segments[-1].get("end", 0))
+            except (ValueError, TypeError):
+                pass
+
+        preview = full_text[:500] + ("..." if len(full_text) > 500 else "") if full_text else "(no text)"
+
+        header = (
+            f"📝 *Transcription Complete*\n"
+            f"`Job ID:` `{job_id}`\n"
+            f"`Language:` {lang}\n"
+            f"`Segments:` {segment_count}\n"
+            f"`Duration:` {_format_ts(duration)}\n"
+        )
+        _send_message(header, parse_mode="Markdown")
+        _send_split(
+            f"*Preview:*\n{preview}",
+            parse_mode="Markdown",
+        )
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+def notify_analysis_result(job_id: str, clips_data: dict) -> None:
+    """
+    Send an AI analysis result summary after clips are identified.
+    Shows clip count and each clip's title, time range, and hook text.
+    Runs async.
+    """
+    def _bg():
+        shorts = clips_data.get("shorts", [])
+        count = len(shorts)
+        fallback = clips_data.get("fallback_reason", "") or clips_data.get("gemini_quota_exhausted", False)
+        fallback_note = " _(fallback from transcript)_" if fallback else ""
+
         header = (
             f"🤖 *AI Analysis Complete*\n"
             f"`Job ID:` `{job_id}`\n"
-            f"\n"
+            f"`Clips found:` {count}{fallback_note}\n"
         )
-        escaped = raw_response.replace("```", "\\`\\`\\`")
-        body = f"```\n{escaped}\n```"
-        # Use split to send header separately from code block
         _send_message(header, parse_mode="Markdown")
-        _send_message(_escape_md(body), parse_mode="MarkdownV2")
-        print(f"[TL] Gemini response sent for {job_id}")
+
+        for i, clip in enumerate(shorts):
+            start = clip.get("start", 0)
+            end = clip.get("end", 0)
+            title = clip.get("video_title_for_youtube_short", "No Title")
+            hook = clip.get("viral_hook_text", "")
+            caption = clip.get("video_description_for_tiktok", "")[:200]
+
+            parts = []
+            parts.append(f"`Clip {i+1}:` {title}")
+            parts.append(f"`Time:` {_format_ts(start)} → {_format_ts(end)}")
+            if hook:
+                parts.append(f"`Hook:` {hook}")
+            if caption:
+                parts.append(f"`Caption:` {caption[:200]}")
+            _send_message("\n".join(parts), parse_mode="Markdown")
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -347,8 +394,6 @@ def notify_clip_ready(
         else:
             _send_message(f"`Video file not found locally.`", parse_mode="Markdown")
 
-        print(f"[TL] Clip ready notification sent for {job_id}/clip_{clip_index}")
-
     threading.Thread(target=_bg, daemon=True).start()
 
 
@@ -363,7 +408,6 @@ def notify_job_completed(job_id: str, clips: list, source: str = "web") -> None:
             f"`Clips generated:` {count}"
         )
         _send_message(text, parse_mode="Markdown")
-        print(f"[TL] Job completed notification sent for {job_id} ({count} clips)")
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -382,7 +426,6 @@ def notify_job_failed(job_id: str, error: str, source: str = "web") -> None:
             parse_mode="Markdown",
         )
         _send_split(error, parse_mode="Markdown")
-        print(f"[TL] Job failed notification sent for {job_id}")
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -403,8 +446,8 @@ def _poll_updates(offset: int = 0) -> Optional[dict]:
             if not result.get("ok"):
                 return None
             return result.get("result", [])
-    except Exception as e:
-        print(f"[TL] getUpdates failed: {e}")
+    except Exception:
+        pass
     return None
 
 
@@ -453,10 +496,7 @@ def start_bot(on_url_callback) -> None:
     This function blocks forever — call it in a dedicated thread.
     """
     if not _is_configured():
-        print("[TL] Bot not started: not configured or disabled.")
         return
-
-    print(f"[TL] Bot starting. Token: ...{BOT_TOKEN[-4:]}, Chat ID: {CHAT_ID}")
 
     # Set webhook to None first to ensure clean polling state
     _post("setWebhook", {"url": ""})
@@ -508,9 +548,8 @@ def start_bot(on_url_callback) -> None:
                 )
                 try:
                     on_url_callback(youtube_url, chat_id, message_id)
-                except Exception as e:
-                    print(f"[TL] Bot callback error: {e}")
-                    _send_reply(chat_id, f"⚠️ Failed to start job: {e}", message_id)
+                except Exception:
+                    _send_reply(chat_id, "⚠️ Failed to start job.", message_id)
             else:
                 # Not a YouTube URL
                 _send_reply(chat_id, USAGE_INSTRUCTIONS, message_id)

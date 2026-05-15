@@ -1334,6 +1334,7 @@ if __name__ == '__main__':
         transcript = transcribe_video(input_video)
         if tl_service:
             tl_service.notify_step(os.path.basename(output_dir), "Transcription completed", f"{len(transcript.get('segments', []))} segments")
+            tl_service.notify_transcription_result(os.path.basename(output_dir), transcript)
 
         # Get duration
         cap = cv2.VideoCapture(input_video)
@@ -1345,12 +1346,7 @@ if __name__ == '__main__':
         # 4. Gemini Analysis
         if tl_service:
             tl_service.notify_step(os.path.basename(output_dir), "AI Analysis started", "Identifying viral moments...")
-        raw_response_text = None
         clips_data = get_viral_clips(transcript, duration)
-
-        if clips_data and 'gemini_quota_exhausted' not in clips_data:
-            # Capture raw JSON for TL (before parsing)
-            raw_response_text = json.dumps({"shorts": clips_data.get("shorts", [])}, indent=2)
 
         if clips_data and clips_data.get('gemini_quota_exhausted'):
             print("⚠️  Gemini quota exhausted. Creating fallback clips from transcript...")
@@ -1376,8 +1372,8 @@ if __name__ == '__main__':
             process_video_to_vertical(input_video, output_file)
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} viral clips!")
-            if tl_service and raw_response_text:
-                tl_service.notify_gemini_response(os.path.basename(output_dir), raw_response_text)
+            if tl_service:
+                tl_service.notify_analysis_result(os.path.basename(output_dir), clips_data)
 
             # 5. Process each clip
             job_id_from_dir = os.path.basename(output_dir)

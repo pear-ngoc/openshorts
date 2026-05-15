@@ -177,9 +177,9 @@ async def lifespan(app: FastAPI):
             )
         bot_thread = threading.Thread(target=run_bot, daemon=True, name="tl-bot")
         bot_thread.start()
-        print("[TL] Bot polling thread started.")
+        print("Bot polling thread started.")
     else:
-        print("[TL] Bot disabled or not configured — skipping polling.")
+        print("Bot disabled or not configured — skipping polling.")
 
     yield
     # Cleanup (optional: cancel worker)
@@ -492,7 +492,7 @@ def _handle_tl_job(url: str, source: str = "tl") -> Optional[str]:
     model = os.getenv("LLM_MODEL") or ""
 
     if not api_key:
-        print("[TL] Cannot create TL job: no LLM API key configured.")
+        print("Cannot create TL job: no LLM API key configured.")
         tl_service.notify_job_failed("", "LLM API key not configured on server. Cannot process jobs.", source)
         return None
 
@@ -532,7 +532,7 @@ def _handle_tl_job(url: str, source: str = "tl") -> Optional[str]:
 
     tl_service.notify_job_submitted(job_id, url, source=source)
     asyncio.create_task(job_queue.put(job_id))
-    print(f"[TL] Job {job_id} created for URL: {url}")
+    print(f"Job {job_id} created for URL: {url}")
     return job_id
 
 

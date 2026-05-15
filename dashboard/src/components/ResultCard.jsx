@@ -4,6 +4,7 @@ import { getApiUrl } from '../config';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
+import AutoEditModal from './AutoEditModal';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
 export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, geminiBaseUrl, llmProvider, llmModel, elevenLabsKey, onPlay, onPause }) {
@@ -64,6 +65,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [tlResult, setTLResult] = useState(null);
     const [showHookModal, setShowHookModal] = useState(false);
     const [showTranslateModal, setShowTranslateModal] = useState(false);
+    const [showAutoEditModal, setShowAutoEditModal] = useState(false);
     const [editError, setEditError] = useState(null);
 
     const [clipDuration, setClipDuration] = useState(clip.end && clip.start ? clip.end - clip.start : 30);
@@ -90,78 +92,43 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         }
     }, [showModal, clip]);
 
-    const handleAutoEdit = async () => {
-        console.log('[AutoEdit] Button clicked, starting...');
+    const handleAutoEdit = async (effectsConfig) => {
+        console.log('[AutoEdit] Applying effects from modal...');
         setIsEditing(true);
         setEditError(null);
         try {
-            console.log('[AutoEdit] Getting API credentials...');
             const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
             const baseUrl = geminiBaseUrl || localStorage.getItem('gemini_base_url');
             const provider = llmProvider || localStorage.getItem('llm_provider') || 'gemini';
             const model = llmModel || localStorage.getItem('llm_model') || '';
 
-            console.log('[AutoEdit] apiKey:', !!apiKey, 'baseUrl:', baseUrl, 'provider:', provider, 'model:', model);
-
-            if (!apiKey) {
-                throw new Error("Gemini API Key is missing. Please set it in Settings.");
+            if (effectsConfig && effectsConfig.segments) {
+                console.log('[AutoEdit] Rendering effects with Remotion...');
+                const newLayers = { ...activeLayers, effects: effectsConfig };
+                setActiveLayers(newLayers);
+                const blobUrl = await renderInBrowser({
+                    videoUrl: originalVideoUrl,
+                    durationInSeconds: clipDuration,
+                    subtitles: newLayers.subtitles,
+                    hook: newLayers.hook,
+                    effects: newLayers.effects,
+                });
+                console.log('[AutoEdit] Render complete, blob URL:', blobUrl);
+                setCurrentVideoUrl(blobUrl);
+                if (videoRef.current) videoRef.current.load();
+                return;
             }
 
-            // Only send input_filename for server URLs (not blob URLs)
+            // Fallback: legacy FFmpeg edit endpoint (no modal effects)
             const sendFilename = currentVideoUrl && !currentVideoUrl.startsWith('blob:')
                 ? currentVideoUrl.split('/').pop()
                 : undefined;
 
-            // Try Remotion effects endpoint first
-            console.log('[AutoEdit] Calling /api/effects/generate...');
-            const effectsRes = await fetch(getApiUrl('/api/effects/generate'), {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-LLM-Key': apiKey,
-                    'X-LLM-Provider': provider,
-                    ...(baseUrl?.trim() ? { 'X-LLM-Base-Url': baseUrl.trim() } : {}),
-                    ...(model?.trim() ? { 'X-LLM-Model': model.trim() } : {}),
-                },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: index,
-                    ...(sendFilename ? { input_filename: sendFilename } : {})
-                })
-            });
-            console.log('[AutoEdit] /api/effects/generate response:', effectsRes.status, effectsRes.statusText);
-
-            if (effectsRes.ok) {
-                const data = await effectsRes.json();
-                console.log('[AutoEdit] effects data:', JSON.stringify(data));
-                if (data.effects && data.effects.segments) {
-                    console.log('[AutoEdit] Got segments, rendering in browser...');
-                    const newLayers = { ...activeLayers, effects: data.effects };
-                    setActiveLayers(newLayers);
-                    const blobUrl = await renderInBrowser({
-                        videoUrl: originalVideoUrl,
-                        durationInSeconds: clipDuration,
-                        subtitles: newLayers.subtitles,
-                        hook: newLayers.hook,
-                        effects: newLayers.effects,
-                    });
-                    console.log('[AutoEdit] Render complete, blob URL:', blobUrl);
-                    setCurrentVideoUrl(blobUrl);
-                    if (videoRef.current) videoRef.current.load();
-                    return;
-                } else {
-                    console.log('[AutoEdit] No segments in response, falling back to FFmpeg edit');
-                }
-            } else {
-                console.log('[AutoEdit] Effects API not OK, falling back to FFmpeg edit');
-            }
-
-            // Fallback: legacy FFmpeg edit endpoint
             const res = await fetch(getApiUrl('/api/edit'), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-LLM-Key': apiKey,
+                    'X-LLM-Key': apiKey || '',
                     'X-LLM-Provider': provider,
                     ...(baseUrl?.trim() ? { 'X-LLM-Base-Url': baseUrl.trim() } : {}),
                     ...(model?.trim() ? { 'X-LLM-Model': model.trim() } : {}),
@@ -169,8 +136,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: index,
-                    ...(sendFilename ? { input_filename: sendFilename } : {})
-                })
+                    ...(sendFilename ? { input_filename: sendFilename } : {}),
+                }),
             });
 
             if (!res.ok) {
@@ -186,9 +153,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             const data = await res.json();
             if (data.new_video_url) {
                 setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                if (videoRef.current) {
-                    videoRef.current.load();
-                }
+                if (videoRef.current) videoRef.current.load();
             }
 
         } catch (e) {
@@ -533,7 +498,14 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 {/* Actions Footer */}
                 <div className="grid grid-cols-2 gap-3 mt-auto pt-4 border-t border-white/5">
                     <button
-                        onClick={handleAutoEdit}
+                        onClick={() => {
+                            if (!geminiApiKey && !localStorage.getItem('gemini_key')) {
+                                setEditError("Gemini API Key is missing. Please set it in Settings.");
+                                setTimeout(() => setEditError(null), 5000);
+                                return;
+                            }
+                            setShowAutoEditModal(true);
+                        }}
                         disabled={isEditing}
                         className="col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
@@ -759,6 +731,23 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 isProcessing={isTranslating}
                 videoUrl={currentVideoUrl}
                 hasApiKey={!!elevenLabsKey}
+            />
+
+            <AutoEditModal
+                isOpen={showAutoEditModal}
+                onClose={() => setShowAutoEditModal(false)}
+                onApply={handleAutoEdit}
+                isProcessing={isEditing}
+                videoUrl={originalVideoUrl}
+                jobId={jobId}
+                clipIndex={index}
+                clipDuration={clipDuration}
+                existingSubtitles={activeLayers.subtitles}
+                existingHook={activeLayers.hook}
+                apiKey={geminiApiKey || localStorage.getItem('gemini_key')}
+                baseUrl={geminiBaseUrl || localStorage.getItem('gemini_base_url')}
+                provider={llmProvider || localStorage.getItem('llm_provider') || 'gemini'}
+                model={llmModel || localStorage.getItem('llm_model') || ''}
             />
 
         </div>

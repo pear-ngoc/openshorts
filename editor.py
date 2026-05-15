@@ -9,6 +9,14 @@ from typing import Optional, Union
 from openai import OpenAI as _OpenAI
 
 
+def _normalize_openai_base_url(base_url: str) -> str:
+    """Ensure an OpenAI-compatible base URL ends with /v1 for chat completions."""
+    base_url = base_url.rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url = base_url + "/v1"
+    return base_url
+
+
 def _is_openai_compatible(base_url: Optional[str]) -> bool:
     """Detect if we're using a self-hosted OpenAI-compatible endpoint."""
     if not base_url:
@@ -26,7 +34,7 @@ class VideoEditor:
 
         if _is_openai_compatible(base_url):
             self._provider = "openai_compatible"
-            self._client = _OpenAI(api_key=api_key, base_url=base_url)
+            self._client = _OpenAI(api_key=api_key, base_url=_normalize_openai_base_url(base_url))
             self._video_file = None
         else:
             self._provider = "gemini"

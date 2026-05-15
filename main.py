@@ -28,11 +28,11 @@ warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf'
 # Load environment variables FIRST so module-level env reads pick up .env values
 load_dotenv()
 
-# TL notifications — gracefully absent if module not available
+# Notification — gracefully absent if module not available
 try:
-    import tl_service
+    import notification_service
 except ImportError:
-    tl_service = None
+    notification_service = None
 
 # ─── Transcription Provider Config ───────────────────────────────────────
 TRANSCRIPTION_PROVIDER = os.getenv("TRANSCRIPTION_PROVIDER", "local").lower()
@@ -838,19 +838,20 @@ def process_video_to_vertical(input_video, final_output_video):
 
     print("\n   🔊 Step 5: Extracting audio...")
     audio_extract_command = [
-        'ffmpeg', '-y', '-i', input_video, '-vn', '-acodec', 'copy', temp_audio_output
+        'ffmpeg', '-y', '-i', input_video, '-vn',
+        '-acodec', 'aac', '-b:a', '192k',
+        temp_audio_output
     ]
     try:
         subprocess.run(audio_extract_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError:
-        print("\n   ❌ Audio extraction failed (maybe no audio?). Proceeding without audio.")
         pass
 
-    print("\n   ✨ Step 6: Merging...")
     if os.path.exists(temp_audio_output):
         merge_command = [
             'ffmpeg', '-y', '-i', temp_video_output, '-i', temp_audio_output,
-            '-c:v', 'copy', '-c:a', 'copy', final_output_video
+            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+            '-shortest', final_output_video
         ]
     else:
          merge_command = [
@@ -860,10 +861,7 @@ def process_video_to_vertical(input_video, final_output_video):
         
     try:
         subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        print(f"   ✅ Clip saved to {final_output_video}")
-    except subprocess.CalledProcessError as e:
-        print("\n   ❌ Final merge failed.")
-        print("   Stderr:", e.stderr.decode())
+    except subprocess.CalledProcessError:
         return False
 
     # Clean up temp files
@@ -1329,12 +1327,12 @@ if __name__ == '__main__':
             print(f"   ✅ Saved metadata to {metadata_file}")
     else:
         # 3. Transcribe
-        if tl_service:
-            tl_service.notify_step(os.path.basename(output_dir), "Transcription started", f"Processing: {input_video}")
+        if notification_service:
+            notification_service.notify_step(os.path.basename(output_dir), "Transcription started", f"Processing: {input_video}")
         transcript = transcribe_video(input_video)
-        if tl_service:
-            tl_service.notify_step(os.path.basename(output_dir), "Transcription completed", f"{len(transcript.get('segments', []))} segments")
-            tl_service.notify_transcription_result(os.path.basename(output_dir), transcript)
+        if notification_service:
+            notification_service.notify_step(os.path.basename(output_dir), "Transcription completed", f"{len(transcript.get('segments', []))} segments")
+            notification_service.notify_transcription_result(os.path.basename(output_dir), transcript)
 
         # Get duration
         cap = cv2.VideoCapture(input_video)
@@ -1344,14 +1342,14 @@ if __name__ == '__main__':
         cap.release()
 
         # 4. Gemini Analysis
-        if tl_service:
-            tl_service.notify_step(os.path.basename(output_dir), "AI Analysis started", "Identifying viral moments...")
+        if notification_service:
+            notification_service.notify_step(os.path.basename(output_dir), "AI Analysis started", "Identifying viral moments...")
         clips_data = get_viral_clips(transcript, duration)
 
         if clips_data and clips_data.get('gemini_quota_exhausted'):
             print("⚠️  Gemini quota exhausted. Creating fallback clips from transcript...")
-            if tl_service:
-                tl_service.notify_step(os.path.basename(output_dir), "Gemini quota exhausted", "Falling back to transcript segments")
+            if notification_service:
+                notification_service.notify_step(os.path.basename(output_dir), "Gemini quota exhausted", "Falling back to transcript segments")
             fallback_clips = _make_transcript_fallback_clips(transcript, duration)
             if not fallback_clips:
                 print("❌ Gemini quota exhausted AND no transcript speech segments found. Cannot create clips.")
@@ -1372,20 +1370,20 @@ if __name__ == '__main__':
             process_video_to_vertical(input_video, output_file)
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} viral clips!")
-            if tl_service:
-                tl_service.notify_analysis_result(os.path.basename(output_dir), clips_data)
+            if notification_service:
+                notification_service.notify_analysis_result(os.path.basename(output_dir), clips_data)
 
             # 5. Process each clip
             job_id_from_dir = os.path.basename(output_dir)
-            if tl_service:
-                tl_service.notify_step(job_id_from_dir, "Cutting clips", f"Processing {len(clips_data['shorts'])} clips...")
+            if notification_service:
+                notification_service.notify_step(job_id_from_dir, "Cutting clips", f"Processing {len(clips_data['shorts'])} clips...")
             for i, clip in enumerate(clips_data['shorts']):
                 start = clip['start']
                 end = clip['end']
                 print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
                 print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
-                if tl_service:
-                    tl_service.notify_step(job_id_from_dir, f"Cutting clip {i+1}", f"{start}s - {end}s")
+                if notification_service:
+                    notification_service.notify_step(job_id_from_dir, f"Cutting clip {i+1}", f"{start}s - {end}s")
 
                 # Cut clip — use job_id as prefix so the filename is stable and discoverable.
                 clip_filename = f"{job_id_from_dir}_clip_{i+1}.mp4"
@@ -1414,10 +1412,10 @@ if __name__ == '__main__':
                     clips_data['shorts'][i]['filename'] = clip_filename
                     clips_data['shorts'][i]['path'] = clip_final_path
                     clips_data['shorts'][i]['video_url'] = f"/videos/{job_id_from_dir}/{clip_filename}"
-                    # Notify TL about the ready clip
-                    if tl_service:
-                        source = os.getenv("TL_JOB_SOURCE", "unknown")
-                        tl_service.notify_clip_ready(
+                    # Notify about the ready clip
+                    if notification_service:
+                        source = os.getenv("NOTIFY_JOB_SOURCE", "unknown")
+                        notification_service.notify_clip_ready(
                             job_id=job_id_from_dir,
                             clip=clips_data['shorts'][i],
                             file_path=clip_final_path,

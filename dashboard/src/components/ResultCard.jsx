@@ -567,8 +567,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                 window.URL.revokeObjectURL(url);
                                 document.body.removeChild(a);
 
-                                // Send to TL in background
-                                fetch(getApiUrl('/api/jobs/send-tl'), {
+                                fetch(getApiUrl('/api/jobs/downloaded'), {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ job_id: jobId, clip_index: index })

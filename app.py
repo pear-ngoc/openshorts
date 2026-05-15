@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
-import tl_service
+import notification_service
 
 load_dotenv()
 
@@ -165,15 +165,15 @@ async def run_job_wrapper(job_id):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start worker, cleanup, and TL bot
+    # Start worker, cleanup
     worker_task = asyncio.create_task(process_queue())
     cleanup_task = asyncio.create_task(cleanup_jobs())
 
-    # Start TL bot polling in a background thread (non-blocking)
-    if tl_service.is_enabled():
+    # Start polling in a background thread (non-blocking)
+    if notification_service.is_enabled():
         def run_bot():
-            tl_service.start_bot(
-                on_url_callback=lambda url, chat_id, message_id: _handle_tl_job(url, source="tl")
+            notification_service.start_bot(
+                on_url_callback=lambda url, chat_id, message_id: _handle_notify_job(url, source="notify")
             )
         bot_thread = threading.Thread(target=run_bot, daemon=True, name="tl-bot")
         bot_thread.start()
@@ -239,18 +239,18 @@ async def run_job(job_id, job_data):
     jobs[job_id]['status'] = 'processing'
     jobs[job_id]['logs'].append("Job started by worker.")
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
-    tl_service.notify_step(job_id, "Job started", f"Processing: {source_url}")
+    notification_service.notify_step(job_id, "Job started", f"Processing: {source_url}")
 
-    # Track which clip filenames we've already notified to TL about (avoid duplicates)
+    # Track which clip filenames we've already notified (avoid duplicates)
     _notified_clips: set = set()
 
     def _notify_ready_clip(clip: dict, clip_index: int, clip_path: str):
-        """Send TL notification for a single ready clip (runs in background thread)."""
+        """Send notification for a single ready clip (runs in background thread)."""
         filename = os.path.basename(clip.get("video_url", clip_path))
         if filename not in _notified_clips:
             _notified_clips.add(filename)
             clip["_local_path"] = clip_path
-            tl_service.notify_clip_ready(
+            notification_service.notify_clip_ready(
                 job_id=job_id,
                 clip=clip,
                 file_path=clip_path,
@@ -318,7 +318,7 @@ async def run_job(job_id, job_data):
                         
                         if ready_clips:
                              jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
-                             # Notify TL about each newly-ready clip
+                             # Notify about each newly-ready clip
                              for ci, clip in enumerate(ready_clips):
                                  vid_url = clip.get('video_url', '')
                                  filename = os.path.basename(vid_url)
@@ -378,7 +378,7 @@ async def run_job(job_id, job_data):
 
                 jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
 
-                # Notify TL about all clips
+                # Notify about all clips
                 for ci, clip in enumerate(clips):
                     vid_url = clip.get('video_url', '')
                     filename = os.path.basename(vid_url)
@@ -386,7 +386,7 @@ async def run_job(job_id, job_data):
                     if os.path.exists(clip_path):
                         _notify_ready_clip(clip, ci, clip_path)
 
-                tl_service.notify_job_completed(job_id, clips, source=source)
+                notification_service.notify_job_completed(job_id, clips, source=source)
             else:
                 # Fallback: no metadata.json found. Check if mp4 files exist and
                 # generate a minimal metadata so the job is still marked completed.
@@ -414,16 +414,16 @@ async def run_job(job_id, job_data):
                 else:
                     jobs[job_id]['status'] = 'failed'
                     jobs[job_id]['logs'].append("No metadata file generated and no mp4 files found.")
-                    tl_service.notify_job_failed(job_id, "No metadata file generated and no mp4 files found.", source)
+                    notification_service.notify_job_failed(job_id, "No metadata file generated and no mp4 files found.", source)
         else:
             jobs[job_id]['status'] = 'failed'
             jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
-            tl_service.notify_job_failed(job_id, f"Process exited with code {returncode}", source)
+            notification_service.notify_job_failed(job_id, f"Process exited with code {returncode}", source)
 
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
-        tl_service.notify_job_failed(job_id, str(e), source)
+        notification_service.notify_job_failed(job_id, str(e), source)
 
 # ─── Helper: resolve LLM config from request headers ──────────────────────
 def _resolve_llm_headers(request) -> dict:
@@ -478,9 +478,9 @@ def _build_llm_env(llm_headers: dict) -> dict:
     return env
 
 
-def _handle_tl_job(url: str, source: str = "tl") -> Optional[str]:
+def _handle_notify_job(url: str, source: str = "notify") -> Optional[str]:
     """
-    Create a processing job for a URL submitted from the TL bot.
+    Create a processing job for a URL submitted from the notification bot.
     Returns the job_id on success, None on failure.
     """
     from dotenv import load_dotenv as _load_dotenv
@@ -492,7 +492,7 @@ def _handle_tl_job(url: str, source: str = "tl") -> Optional[str]:
     model = os.getenv("LLM_MODEL") or ""
 
     if not api_key:
-        tl_service.notify_job_failed("", "LLM API key not configured on server. Cannot process jobs.", source)
+        notification_service.notify_job_failed("", "LLM API key not configured on server. Cannot process jobs.", source)
         return None
 
     job_id = str(uuid.uuid4())
@@ -529,7 +529,7 @@ def _handle_tl_job(url: str, source: str = "tl") -> Optional[str]:
         },
     }
 
-    tl_service.notify_job_submitted(job_id, url, source=source)
+    notification_service.notify_job_submitted(job_id, url, source=source)
     asyncio.create_task(job_queue.put(job_id))
     print(f"Job {job_id} created for URL: {url}")
     return job_id
@@ -628,9 +628,9 @@ async def process_endpoint(
 
     await job_queue.put(job_id)
 
-    # Notify TL about the new web-submitted job
+    # Notify about the new web-submitted job
     source = attestation.get('source', 'web')
-    tl_service.notify_job_submitted(job_id, url or 'file_upload', source=source)
+    notification_service.notify_job_submitted(job_id, url or 'file_upload', source=source)
 
     return {"job_id": job_id, "status": "queued"}
 
@@ -1006,9 +1006,9 @@ class SendTLRequest(BaseModel):
     clip_index: int
 
 
-@app.post("/api/jobs/send-tl")
+@app.post("/api/jobs/downloaded")
 async def send_clip_to_tl(req: SendTLRequest):
-    """Send a specific clip to TL with its full metadata."""
+    """Send a specific clip to notification with its full metadata."""
     if req.job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1043,7 +1043,7 @@ async def send_clip_to_tl(req: SendTLRequest):
             pass
 
     def _do_send():
-        tl_service.notify_clip_ready(
+        notification_service.notify_clip_ready(
             job_id=req.job_id,
             clip=clip,
             file_path=file_path,

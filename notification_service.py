@@ -1,9 +1,9 @@
 """
-tl_service.py
-TL bot integration for OpenShorts.
+notification_service.py
+Telegram bot integration for OpenShorts.
 
 Provides non-blocking notification helpers that gracefully degrade
-when TL_ENABLED=false or credentials are missing.
+when NOTIFY_ENABLED=false or credentials are missing.
 """
 
 import os
@@ -13,18 +13,17 @@ import threading
 import httpx
 from typing import Optional, Any
 
-# Load .env so TL_* vars are available even when app.py hasn't loaded dotenv yet
 from dotenv import load_dotenv
 load_dotenv()
 
-BOT_TOKEN = os.getenv("TL_BOT_TOKEN", "TOKEN_MOI_CUA_BAN").strip()
-CHAT_ID = os.getenv("TL_CHAT_ID", "1986129893").strip()
-ENABLED = os.getenv("TL_ENABLED", "true").lower() in ("1", "true", "yes")
+BOT_TOKEN = os.getenv("NOTIFY_BOT_TOKEN", "TOKEN_MOI_CUA_BAN").strip()
+CHAT_ID = os.getenv("NOTIFY_CHAT_ID", "1986129893").strip()
+ENABLED = os.getenv("NOTIFY_ENABLED", "true").lower() in ("1", "true", "yes")
 
-# TL API base
+# Telegram API base
 _API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Hard limit for a single TL message body (caption or text).
+# Hard limit for a single message body (caption or text).
 # API allows 4096 chars; we leave headroom for formatting.
 _SINGLE_MSG_LIMIT = 3900
 
@@ -32,7 +31,7 @@ _SINGLE_MSG_LIMIT = 3900
 # ─── Internal helpers ──────────────────────────────────────────────────────────
 
 def _escape_md(text: str) -> str:
-    """Escape MarkdownV2 special characters for safe TL rendering."""
+    """Escape MarkdownV2 special characters for safe rendering."""
     # Characters that need escaping in MarkdownV2: _ * [ ] ( ) ~ ` > # + - = | { } . !
     escapees = r'_*[]()~`>#+\-=|{}.!'
     for ch in escapees:
@@ -49,7 +48,7 @@ def _api_url(endpoint: str) -> str:
 
 
 def _post(endpoint: str, data: Optional[dict] = None, files: Optional[dict] = None) -> Optional[dict]:
-    """Make a POST request to the TL Bot API. Returns None on failure."""
+    """Make a POST request to the Telegram Bot API. Returns None on failure."""
     if not _is_configured():
         return None
     try:
@@ -161,7 +160,7 @@ def send_code_block(title: str, raw_text: str, job_id: str) -> bool:
     escaped = raw_text.replace("```", "\\`\\`\\`")
     body = f"```\n{escaped}\n```"
 
-    # TL sendMessage doesn't support code blocks — use sendDocument instead
+    # sendMessage doesn't support code blocks — use sendDocument instead
     # so the content is displayed as a downloadable code file.
     try:
         import json as _json
@@ -181,8 +180,8 @@ def send_code_block(title: str, raw_text: str, job_id: str) -> bool:
 
 def send_video(file_path: str, caption: str) -> bool:
     """
-    Upload a local video file to TL with a caption.
-    Caption is truncated to 1024 chars (TL's caption limit).
+    Upload a local video file with a caption.
+    Caption is truncated to 1024 chars.
     """
     if not _is_configured():
         return False
@@ -193,7 +192,7 @@ def send_video(file_path: str, caption: str) -> bool:
         with httpx.Client(timeout=120.0) as client:
             with open(file_path, "rb") as f:
                 files = {"video": f}
-                # TL caps captions at 1024 chars
+                # Caps captions at 1024 chars
                 data = {
                     "chat_id": CHAT_ID,
                     "caption": caption[:1024],
@@ -211,7 +210,7 @@ def send_video(file_path: str, caption: str) -> bool:
 
 
 def send_document(file_path: str, caption: str) -> bool:
-    """Send a local file as a TL document (no size limits)."""
+    """Send a local file as a document (no size limits)."""
     if not _is_configured():
         return False
     if not os.path.exists(file_path):
@@ -237,7 +236,7 @@ def send_document(file_path: str, caption: str) -> bool:
 
 def notify_job_submitted(job_id: str, url: str, source: str, youtube_title: str = "") -> None:
     """
-    Fired immediately when a job is created — from web or TL.
+    Fired immediately when a job is created — from web or bot.
     Runs in a background thread so it never blocks the request.
     """
     def _bg():
@@ -433,7 +432,7 @@ def notify_job_failed(job_id: str, error: str, source: str = "web") -> None:
 # ─── Bot input polling ─────────────────────────────────────────────────────────
 
 def _poll_updates(offset: int = 0) -> Optional[dict]:
-    """Fetch new updates from the TL bot. Returns None on failure."""
+    """Fetch new updates from the bot. Returns None on failure."""
     if not _is_configured():
         return None
     try:
@@ -491,7 +490,7 @@ USAGE_INSTRUCTIONS = (
 
 def start_bot(on_url_callback) -> None:
     """
-    Run the TL bot in a blocking polling loop.
+    Run the bot in a blocking polling loop.
     `on_url_callback(url, chat_id, message_id)` is called for each new YouTube URL.
     This function blocks forever — call it in a dedicated thread.
     """

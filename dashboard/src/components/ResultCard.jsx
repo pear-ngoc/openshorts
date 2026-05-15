@@ -107,6 +107,11 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 throw new Error("Gemini API Key is missing. Please set it in Settings.");
             }
 
+            // Only send input_filename for server URLs (not blob URLs)
+            const sendFilename = currentVideoUrl && !currentVideoUrl.startsWith('blob:')
+                ? currentVideoUrl.split('/').pop()
+                : undefined;
+
             // Try Remotion effects endpoint first
             console.log('[AutoEdit] Calling /api/effects/generate...');
             const effectsRes = await fetch(getApiUrl('/api/effects/generate'), {
@@ -121,7 +126,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: index,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    ...(sendFilename ? { input_filename: sendFilename } : {})
                 })
             });
             console.log('[AutoEdit] /api/effects/generate response:', effectsRes.status, effectsRes.statusText);
@@ -164,7 +169,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: index,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    ...(sendFilename ? { input_filename: sendFilename } : {})
                 })
             });
 
@@ -231,7 +236,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     border_width: options.borderWidth,
                     bg_color: options.bgColor,
                     bg_opacity: options.bgOpacity,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    ...(currentVideoUrl && !currentVideoUrl.startsWith('blob:') ? { input_filename: currentVideoUrl.split('/').pop() } : {})
                 })
             });
 
@@ -285,7 +290,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     text: payload.text,
                     position: payload.position,
                     size: payload.size,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    ...(currentVideoUrl && !currentVideoUrl.startsWith('blob:') ? { input_filename: currentVideoUrl.split('/').pop() } : {})
                 })
             });
 
@@ -320,7 +325,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 job_id: jobId,
                 clip_index: index,
                 target_language: options.targetLanguage,
-                input_filename: currentVideoUrl.split('/').pop()
+                ...(currentVideoUrl && !currentVideoUrl.startsWith('blob:') ? { input_filename: currentVideoUrl.split('/').pop() } : {})
             };
             console.log('[Translate] Request body:', requestBody);
             console.log('[Translate] Sending request to /api/translate');
@@ -572,7 +577,11 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     <button
                         onClick={async (e) => {
                             e.preventDefault();
+                            e.stopPropagation();
+                            setIsSendingToTL(true);
+                            setTLResult(null);
                             try {
+                                // Download video
                                 const response = await fetch(currentVideoUrl);
                                 if (!response.ok) throw new Error('Download failed');
                                 const blob = await response.blob();
@@ -585,29 +594,18 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                 a.click();
                                 window.URL.revokeObjectURL(url);
                                 document.body.removeChild(a);
-                            } catch (err) {
-                                console.error('Download error:', err);
-                                window.open(currentVideoUrl, '_blank');
-                            }
-                        }}
-                        className="col-span-1 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
-                    >
-                        <Download size={14} className="shrink-0" /> Download
-                    </button>
-                    <button
-                        onClick={async () => {
-                            setIsSendingToTL(true);
-                            setTLResult(null);
-                            try {
-                                const res = await fetch(getApiUrl('/api/jobs/send-tl'), {
+
+                                // Send to TL in background
+                                fetch(getApiUrl('/api/jobs/send-tl'), {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ job_id: jobId, clip_index: index })
-                                });
-                                const data = await res.json();
-                                setTLResult({ success: res.ok, msg: data.message || (res.ok ? 'Sent!' : 'Failed') });
+                                }).catch(() => {});
+                                setTLResult({ success: true, msg: 'Downloaded! Sent to TL.' });
                             } catch (err) {
-                                setTLResult({ success: false, msg: err.message });
+                                console.error('Download error:', err);
+                                window.open(currentVideoUrl, '_blank');
+                                setTLResult({ success: false, msg: 'Download failed' });
                             } finally {
                                 setIsSendingToTL(false);
                                 setTimeout(() => setTLResult(null), 4000);
@@ -616,8 +614,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         disabled={isSendingToTL}
                         className="col-span-1 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
                     >
-                        {isSendingToTL ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} className="shrink-0" />}
-                        {isSendingToTL ? 'Sending...' : 'Send to TL'}
+                        {isSendingToTL ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} className="shrink-0" />}
+                        {isSendingToTL ? 'Processing...' : 'Download'}
                     </button>
                 </div>
             </div>

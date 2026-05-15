@@ -1057,6 +1057,33 @@ async def send_clip_to_tl(req: SendTLRequest):
     return {"success": True, "message": "Clip sent to TL"}
 
 
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str):
+    """Delete a job and all its associated files."""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = jobs[job_id]
+    output_dir = job.get("output_dir", os.path.join(OUTPUT_DIR, job_id))
+
+    def _do_delete():
+        # Remove job from memory
+        jobs.pop(job_id, None)
+        # Delete all files in output_dir
+        if os.path.exists(output_dir):
+            import shutil
+            try:
+                shutil.rmtree(output_dir)
+                print(f"[Delete] Removed job directory: {output_dir}")
+            except Exception as e:
+                print(f"[Delete] Failed to remove directory {output_dir}: {e}")
+        # Remove from jobs.json
+        _save_jobs()
+
+    threading.Thread(target=_do_delete, daemon=True).start()
+    return {"success": True, "message": "Job deleted"}
+
+
 @app.post("/api/subtitle")
 async def add_subtitles(req: SubtitleRequest):
     if req.job_id not in jobs:

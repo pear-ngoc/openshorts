@@ -17,7 +17,7 @@ from typing import Optional, Any
 from dotenv import load_dotenv
 load_dotenv()
 
-BOT_TOKEN = os.getenv("TL_BOT_TOKEN", "8874503483:AAHHNRTpysQcIW8WDk_2xnYzXKCdDHzZ6ZY").strip()
+BOT_TOKEN = os.getenv("TL_BOT_TOKEN", "TOKEN_MOI_CUA_BAN").strip()
 CHAT_ID = os.getenv("TL_CHAT_ID", "1986129893").strip()
 ENABLED = os.getenv("TL_ENABLED", "false").lower() in ("1", "true", "yes")
 

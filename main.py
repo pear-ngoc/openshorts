@@ -28,11 +28,11 @@ warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf'
 # Load environment variables FIRST so module-level env reads pick up .env values
 load_dotenv()
 
-# Telegram notifications — gracefully absent if module not available
+# TL notifications — gracefully absent if module not available
 try:
-    import telegram_service
+    import tl_service
 except ImportError:
-    telegram_service = None
+    tl_service = None
 
 # ─── Transcription Provider Config ───────────────────────────────────────
 TRANSCRIPTION_PROVIDER = os.getenv("TRANSCRIPTION_PROVIDER", "local").lower()
@@ -1329,11 +1329,11 @@ if __name__ == '__main__':
             print(f"   ✅ Saved metadata to {metadata_file}")
     else:
         # 3. Transcribe
-        if telegram_service:
-            telegram_service.notify_step(os.path.basename(output_dir), "Transcription started", f"Processing: {input_video}")
+        if tl_service:
+            tl_service.notify_step(os.path.basename(output_dir), "Transcription started", f"Processing: {input_video}")
         transcript = transcribe_video(input_video)
-        if telegram_service:
-            telegram_service.notify_step(os.path.basename(output_dir), "Transcription completed", f"{len(transcript.get('segments', []))} segments")
+        if tl_service:
+            tl_service.notify_step(os.path.basename(output_dir), "Transcription completed", f"{len(transcript.get('segments', []))} segments")
 
         # Get duration
         cap = cv2.VideoCapture(input_video)
@@ -1343,19 +1343,19 @@ if __name__ == '__main__':
         cap.release()
 
         # 4. Gemini Analysis
-        if telegram_service:
-            telegram_service.notify_step(os.path.basename(output_dir), "AI Analysis started", "Identifying viral moments...")
+        if tl_service:
+            tl_service.notify_step(os.path.basename(output_dir), "AI Analysis started", "Identifying viral moments...")
         raw_response_text = None
         clips_data = get_viral_clips(transcript, duration)
 
         if clips_data and 'gemini_quota_exhausted' not in clips_data:
-            # Capture raw JSON for Telegram (before parsing)
+            # Capture raw JSON for TL (before parsing)
             raw_response_text = json.dumps({"shorts": clips_data.get("shorts", [])}, indent=2)
 
         if clips_data and clips_data.get('gemini_quota_exhausted'):
             print("⚠️  Gemini quota exhausted. Creating fallback clips from transcript...")
-            if telegram_service:
-                telegram_service.notify_step(os.path.basename(output_dir), "Gemini quota exhausted", "Falling back to transcript segments")
+            if tl_service:
+                tl_service.notify_step(os.path.basename(output_dir), "Gemini quota exhausted", "Falling back to transcript segments")
             fallback_clips = _make_transcript_fallback_clips(transcript, duration)
             if not fallback_clips:
                 print("❌ Gemini quota exhausted AND no transcript speech segments found. Cannot create clips.")
@@ -1376,20 +1376,20 @@ if __name__ == '__main__':
             process_video_to_vertical(input_video, output_file)
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} viral clips!")
-            if telegram_service and raw_response_text:
-                telegram_service.notify_gemini_response(os.path.basename(output_dir), raw_response_text)
+            if tl_service and raw_response_text:
+                tl_service.notify_gemini_response(os.path.basename(output_dir), raw_response_text)
 
             # 5. Process each clip
             job_id_from_dir = os.path.basename(output_dir)
-            if telegram_service:
-                telegram_service.notify_step(job_id_from_dir, "Cutting clips", f"Processing {len(clips_data['shorts'])} clips...")
+            if tl_service:
+                tl_service.notify_step(job_id_from_dir, "Cutting clips", f"Processing {len(clips_data['shorts'])} clips...")
             for i, clip in enumerate(clips_data['shorts']):
                 start = clip['start']
                 end = clip['end']
                 print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
                 print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
-                if telegram_service:
-                    telegram_service.notify_step(job_id_from_dir, f"Cutting clip {i+1}", f"{start}s - {end}s")
+                if tl_service:
+                    tl_service.notify_step(job_id_from_dir, f"Cutting clip {i+1}", f"{start}s - {end}s")
 
                 # Cut clip — use job_id as prefix so the filename is stable and discoverable.
                 clip_filename = f"{job_id_from_dir}_clip_{i+1}.mp4"
@@ -1418,10 +1418,10 @@ if __name__ == '__main__':
                     clips_data['shorts'][i]['filename'] = clip_filename
                     clips_data['shorts'][i]['path'] = clip_final_path
                     clips_data['shorts'][i]['video_url'] = f"/videos/{job_id_from_dir}/{clip_filename}"
-                    # Notify Telegram about the ready clip
-                    if telegram_service:
-                        source = os.getenv("TELEGRAM_JOB_SOURCE", "unknown")
-                        telegram_service.notify_clip_ready(
+                    # Notify TL about the ready clip
+                    if tl_service:
+                        source = os.getenv("TL_JOB_SOURCE", "unknown")
+                        tl_service.notify_clip_ready(
                             job_id=job_id_from_dir,
                             clip=clips_data['shorts'][i],
                             file_path=clip_final_path,

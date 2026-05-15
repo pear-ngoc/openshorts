@@ -1,9 +1,9 @@
 """
-telegram_service.py
-Telegram bot integration for OpenShorts.
+tl_service.py
+TL bot integration for OpenShorts.
 
 Provides non-blocking notification helpers that gracefully degrade
-when TELEGRAM_ENABLED=false or credentials are missing.
+when TL_ENABLED=false or credentials are missing.
 """
 
 import os
@@ -13,18 +13,18 @@ import threading
 import httpx
 from typing import Optional, Any
 
-# Load .env so TELEGRAM_* vars are available even when app.py hasn't loaded dotenv yet
+# Load .env so TL_* vars are available even when app.py hasn't loaded dotenv yet
 from dotenv import load_dotenv
 load_dotenv()
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8874503483:AAHHNRTpysQcIW8WDk_2xnYzXKCdDHzZ6ZY").strip()
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1986129893").strip()
-ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() in ("1", "true", "yes")
+BOT_TOKEN = os.getenv("TL_BOT_TOKEN", "8874503483:AAHHNRTpysQcIW8WDk_2xnYzXKCdDHzZ6ZY").strip()
+CHAT_ID = os.getenv("TL_CHAT_ID", "1986129893").strip()
+ENABLED = os.getenv("TL_ENABLED", "false").lower() in ("1", "true", "yes")
 
-# Telegram API base
+# TL API base
 _API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Hard limit for a single Telegram message body (caption or text).
+# Hard limit for a single TL message body (caption or text).
 # API allows 4096 chars; we leave headroom for formatting.
 _SINGLE_MSG_LIMIT = 3900
 
@@ -32,7 +32,7 @@ _SINGLE_MSG_LIMIT = 3900
 # ─── Internal helpers ──────────────────────────────────────────────────────────
 
 def _escape_md(text: str) -> str:
-    """Escape MarkdownV2 special characters for safe Telegram rendering."""
+    """Escape MarkdownV2 special characters for safe TL rendering."""
     # Characters that need escaping in MarkdownV2: _ * [ ] ( ) ~ ` > # + - = | { } . !
     escapees = r'_*[]()~`>#+\-=|{}.!'
     for ch in escapees:
@@ -49,7 +49,7 @@ def _api_url(endpoint: str) -> str:
 
 
 def _post(endpoint: str, data: Optional[dict] = None, files: Optional[dict] = None) -> Optional[dict]:
-    """Make a POST request to the Telegram Bot API. Returns None on failure."""
+    """Make a POST request to the TL Bot API. Returns None on failure."""
     if not _is_configured():
         return None
     try:
@@ -58,13 +58,13 @@ def _post(endpoint: str, data: Optional[dict] = None, files: Optional[dict] = No
             resp.raise_for_status()
             result = resp.json()
             if not result.get("ok"):
-                print(f"[Telegram] API error: {result}")
+                print(f"[TL] API error: {result}")
                 return None
             return result.get("result")
     except httpx.HTTPStatusError as e:
-        print(f"[Telegram] HTTP {e.response.status_code}: {e.response.text}")
+        print(f"[TL] HTTP {e.response.status_code}: {e.response.text}")
     except Exception as e:
-        print(f"[Telegram] Request failed: {e}")
+        print(f"[TL] Request failed: {e}")
     return None
 
 
@@ -162,7 +162,7 @@ def send_code_block(title: str, raw_text: str, job_id: str) -> bool:
     escaped = raw_text.replace("```", "\\`\\`\\`")
     body = f"```\n{escaped}\n```"
 
-    # Telegram sendMessage doesn't support code blocks — use sendDocument instead
+    # TL sendMessage doesn't support code blocks — use sendDocument instead
     # so the content is displayed as a downloadable code file.
     try:
         import json as _json
@@ -177,27 +177,27 @@ def send_code_block(title: str, raw_text: str, job_id: str) -> bool:
             msg = _send_message(escaped_body, parse_mode="MarkdownV2")
             return msg is not None
     except Exception as e:
-        print(f"[Telegram] send_code_block failed: {e}")
+        print(f"[TL] send_code_block failed: {e}")
         # Fallback: send as-is
         return _send_split(header + body, parse_mode="Markdown")
 
 
 def send_video(file_path: str, caption: str) -> bool:
     """
-    Upload a local video file to Telegram with a caption.
-    Caption is truncated to 1024 chars (Telegram's caption limit).
+    Upload a local video file to TL with a caption.
+    Caption is truncated to 1024 chars (TL's caption limit).
     """
     if not _is_configured():
         return False
     if not os.path.exists(file_path):
-        print(f"[Telegram] send_video: file not found: {file_path}")
+        print(f"[TL] send_video: file not found: {file_path}")
         return False
 
     try:
         with httpx.Client(timeout=120.0) as client:
             with open(file_path, "rb") as f:
                 files = {"video": f}
-                # Telegram caps captions at 1024 chars
+                # TL caps captions at 1024 chars
                 data = {
                     "chat_id": CHAT_ID,
                     "caption": caption[:1024],
@@ -207,22 +207,22 @@ def send_video(file_path: str, caption: str) -> bool:
                 resp.raise_for_status()
                 result = resp.json()
                 if not result.get("ok"):
-                    print(f"[Telegram] sendVideo error: {result}")
+                    print(f"[TL] sendVideo error: {result}")
                     return False
                 return True
     except httpx.HTTPStatusError as e:
-        print(f"[Telegram] sendVideo HTTP {e.response.status_code}: {e.response.text}")
+        print(f"[TL] sendVideo HTTP {e.response.status_code}: {e.response.text}")
     except Exception as e:
-        print(f"[Telegram] sendVideo failed: {e}")
+        print(f"[TL] sendVideo failed: {e}")
     return False
 
 
 def send_document(file_path: str, caption: str) -> bool:
-    """Send a local file as a Telegram document (no size limits)."""
+    """Send a local file as a TL document (no size limits)."""
     if not _is_configured():
         return False
     if not os.path.exists(file_path):
-        print(f"[Telegram] send_document: file not found: {file_path}")
+        print(f"[TL] send_document: file not found: {file_path}")
         return False
 
     try:
@@ -239,13 +239,13 @@ def send_document(file_path: str, caption: str) -> bool:
                 result = resp.json()
                 return result.get("ok", False)
     except Exception as e:
-        print(f"[Telegram] send_document failed: {e}")
+        print(f"[TL] send_document failed: {e}")
     return False
 
 
 def notify_job_submitted(job_id: str, url: str, source: str, youtube_title: str = "") -> None:
     """
-    Fired immediately when a job is created — from web or Telegram.
+    Fired immediately when a job is created — from web or TL.
     Runs in a background thread so it never blocks the request.
     """
     def _bg():
@@ -259,7 +259,7 @@ def notify_job_submitted(job_id: str, url: str, source: str, youtube_title: str 
         )
         _send_message(text, parse_mode="Markdown")
         # Log locally
-        print(f"[Telegram] Job submitted notification sent for {job_id} (source={source})")
+        print(f"[TL] Job submitted notification sent for {job_id} (source={source})")
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -291,7 +291,7 @@ def notify_gemini_response(job_id: str, raw_response: str) -> None:
         # Use split to send header separately from code block
         _send_message(header, parse_mode="Markdown")
         _send_message(_escape_md(body), parse_mode="MarkdownV2")
-        print(f"[Telegram] Gemini response sent for {job_id}")
+        print(f"[TL] Gemini response sent for {job_id}")
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -347,7 +347,7 @@ def notify_clip_ready(
         else:
             _send_message(f"`Video file not found locally.`", parse_mode="Markdown")
 
-        print(f"[Telegram] Clip ready notification sent for {job_id}/clip_{clip_index}")
+        print(f"[TL] Clip ready notification sent for {job_id}/clip_{clip_index}")
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -363,7 +363,7 @@ def notify_job_completed(job_id: str, clips: list, source: str = "web") -> None:
             f"`Clips generated:` {count}"
         )
         _send_message(text, parse_mode="Markdown")
-        print(f"[Telegram] Job completed notification sent for {job_id} ({count} clips)")
+        print(f"[TL] Job completed notification sent for {job_id} ({count} clips)")
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -382,7 +382,7 @@ def notify_job_failed(job_id: str, error: str, source: str = "web") -> None:
             parse_mode="Markdown",
         )
         _send_split(error, parse_mode="Markdown")
-        print(f"[Telegram] Job failed notification sent for {job_id}")
+        print(f"[TL] Job failed notification sent for {job_id}")
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -390,7 +390,7 @@ def notify_job_failed(job_id: str, error: str, source: str = "web") -> None:
 # ─── Bot input polling ─────────────────────────────────────────────────────────
 
 def _poll_updates(offset: int = 0) -> Optional[dict]:
-    """Fetch new updates from the Telegram bot. Returns None on failure."""
+    """Fetch new updates from the TL bot. Returns None on failure."""
     if not _is_configured():
         return None
     try:
@@ -404,7 +404,7 @@ def _poll_updates(offset: int = 0) -> Optional[dict]:
                 return None
             return result.get("result", [])
     except Exception as e:
-        print(f"[Telegram] getUpdates failed: {e}")
+        print(f"[TL] getUpdates failed: {e}")
     return None
 
 
@@ -448,15 +448,15 @@ USAGE_INSTRUCTIONS = (
 
 def start_bot(on_url_callback) -> None:
     """
-    Run the Telegram bot in a blocking polling loop.
+    Run the TL bot in a blocking polling loop.
     `on_url_callback(url, chat_id, message_id)` is called for each new YouTube URL.
     This function blocks forever — call it in a dedicated thread.
     """
     if not _is_configured():
-        print("[Telegram] Bot not started: not configured or disabled.")
+        print("[TL] Bot not started: not configured or disabled.")
         return
 
-    print(f"[Telegram] Bot starting. Token: ...{BOT_TOKEN[-4:]}, Chat ID: {CHAT_ID}")
+    print(f"[TL] Bot starting. Token: ...{BOT_TOKEN[-4:]}, Chat ID: {CHAT_ID}")
 
     # Set webhook to None first to ensure clean polling state
     _post("setWebhook", {"url": ""})
@@ -509,7 +509,7 @@ def start_bot(on_url_callback) -> None:
                 try:
                     on_url_callback(youtube_url, chat_id, message_id)
                 except Exception as e:
-                    print(f"[Telegram] Bot callback error: {e}")
+                    print(f"[TL] Bot callback error: {e}")
                     _send_reply(chat_id, f"⚠️ Failed to start job: {e}", message_id)
             else:
                 # Not a YouTube URL

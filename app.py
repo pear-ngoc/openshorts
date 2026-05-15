@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
-import telegram_service
+import tl_service
 
 load_dotenv()
 
@@ -165,21 +165,21 @@ async def run_job_wrapper(job_id):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start worker, cleanup, and Telegram bot
+    # Start worker, cleanup, and TL bot
     worker_task = asyncio.create_task(process_queue())
     cleanup_task = asyncio.create_task(cleanup_jobs())
 
-    # Start Telegram bot polling in a background thread (non-blocking)
-    if telegram_service.is_enabled():
+    # Start TL bot polling in a background thread (non-blocking)
+    if tl_service.is_enabled():
         def run_bot():
-            telegram_service.start_bot(
-                on_url_callback=lambda url, chat_id, message_id: _handle_telegram_job(url, source="telegram")
+            tl_service.start_bot(
+                on_url_callback=lambda url, chat_id, message_id: _handle_tl_job(url, source="tl")
             )
-        bot_thread = threading.Thread(target=run_bot, daemon=True, name="telegram-bot")
+        bot_thread = threading.Thread(target=run_bot, daemon=True, name="tl-bot")
         bot_thread.start()
-        print("[Telegram] Bot polling thread started.")
+        print("[TL] Bot polling thread started.")
     else:
-        print("[Telegram] Bot disabled or not configured — skipping polling.")
+        print("[TL] Bot disabled or not configured — skipping polling.")
 
     yield
     # Cleanup (optional: cancel worker)
@@ -239,18 +239,18 @@ async def run_job(job_id, job_data):
     jobs[job_id]['status'] = 'processing'
     jobs[job_id]['logs'].append("Job started by worker.")
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
-    telegram_service.notify_step(job_id, "Job started", f"Processing: {source_url}")
+    tl_service.notify_step(job_id, "Job started", f"Processing: {source_url}")
 
-    # Track which clip filenames we've already notified to Telegram about (avoid duplicates)
+    # Track which clip filenames we've already notified to TL about (avoid duplicates)
     _notified_clips: set = set()
 
     def _notify_ready_clip(clip: dict, clip_index: int, clip_path: str):
-        """Send Telegram notification for a single ready clip (runs in background thread)."""
+        """Send TL notification for a single ready clip (runs in background thread)."""
         filename = os.path.basename(clip.get("video_url", clip_path))
         if filename not in _notified_clips:
             _notified_clips.add(filename)
             clip["_local_path"] = clip_path
-            telegram_service.notify_clip_ready(
+            tl_service.notify_clip_ready(
                 job_id=job_id,
                 clip=clip,
                 file_path=clip_path,
@@ -318,7 +318,7 @@ async def run_job(job_id, job_data):
                         
                         if ready_clips:
                              jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
-                             # Notify Telegram about each newly-ready clip
+                             # Notify TL about each newly-ready clip
                              for ci, clip in enumerate(ready_clips):
                                  vid_url = clip.get('video_url', '')
                                  filename = os.path.basename(vid_url)
@@ -378,7 +378,7 @@ async def run_job(job_id, job_data):
 
                 jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
 
-                # Notify Telegram about all clips
+                # Notify TL about all clips
                 for ci, clip in enumerate(clips):
                     vid_url = clip.get('video_url', '')
                     filename = os.path.basename(vid_url)
@@ -386,7 +386,7 @@ async def run_job(job_id, job_data):
                     if os.path.exists(clip_path):
                         _notify_ready_clip(clip, ci, clip_path)
 
-                telegram_service.notify_job_completed(job_id, clips, source=source)
+                tl_service.notify_job_completed(job_id, clips, source=source)
             else:
                 # Fallback: no metadata.json found. Check if mp4 files exist and
                 # generate a minimal metadata so the job is still marked completed.
@@ -414,16 +414,16 @@ async def run_job(job_id, job_data):
                 else:
                     jobs[job_id]['status'] = 'failed'
                     jobs[job_id]['logs'].append("No metadata file generated and no mp4 files found.")
-                    telegram_service.notify_job_failed(job_id, "No metadata file generated and no mp4 files found.", source)
+                    tl_service.notify_job_failed(job_id, "No metadata file generated and no mp4 files found.", source)
         else:
             jobs[job_id]['status'] = 'failed'
             jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
-            telegram_service.notify_job_failed(job_id, f"Process exited with code {returncode}", source)
+            tl_service.notify_job_failed(job_id, f"Process exited with code {returncode}", source)
 
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
-        telegram_service.notify_job_failed(job_id, str(e), source)
+        tl_service.notify_job_failed(job_id, str(e), source)
 
 # ─── Helper: resolve LLM config from request headers ──────────────────────
 def _resolve_llm_headers(request) -> dict:
@@ -478,9 +478,9 @@ def _build_llm_env(llm_headers: dict) -> dict:
     return env
 
 
-def _handle_telegram_job(url: str, source: str = "telegram") -> Optional[str]:
+def _handle_tl_job(url: str, source: str = "tl") -> Optional[str]:
     """
-    Create a processing job for a URL submitted from the Telegram bot.
+    Create a processing job for a URL submitted from the TL bot.
     Returns the job_id on success, None on failure.
     """
     from dotenv import load_dotenv as _load_dotenv
@@ -492,8 +492,8 @@ def _handle_telegram_job(url: str, source: str = "telegram") -> Optional[str]:
     model = os.getenv("LLM_MODEL") or ""
 
     if not api_key:
-        print("[Telegram] Cannot create Telegram job: no LLM API key configured.")
-        telegram_service.notify_job_failed("", "LLM API key not configured on server. Cannot process jobs.", source)
+        print("[TL] Cannot create TL job: no LLM API key configured.")
+        tl_service.notify_job_failed("", "LLM API key not configured on server. Cannot process jobs.", source)
         return None
 
     job_id = str(uuid.uuid4())
@@ -517,22 +517,22 @@ def _handle_telegram_job(url: str, source: str = "telegram") -> Optional[str]:
 
     jobs[job_id] = {
         "status": "queued",
-        "logs": [f"Job {job_id} queued (via Telegram)."],
+        "logs": [f"Job {job_id} queued."],
         "cmd": cmd,
         "env": env,
         "output_dir": job_output_dir,
         "attestation": {
             "acknowledged": True,
-            "ip": "telegram",
-            "user_agent": "telegram-bot",
+            "ip": "tl",
+            "user_agent": "tl-bot",
             "timestamp": time.time(),
-            "source": "telegram",
+            "source": "tl",
         },
     }
 
-    telegram_service.notify_job_submitted(job_id, url, source=source)
+    tl_service.notify_job_submitted(job_id, url, source=source)
     asyncio.create_task(job_queue.put(job_id))
-    print(f"[Telegram] Job {job_id} created for URL: {url}")
+    print(f"[TL] Job {job_id} created for URL: {url}")
     return job_id
 
 
@@ -629,9 +629,9 @@ async def process_endpoint(
 
     await job_queue.put(job_id)
 
-    # Notify Telegram about the new web-submitted job
+    # Notify TL about the new web-submitted job
     source = attestation.get('source', 'web')
-    telegram_service.notify_job_submitted(job_id, url or 'file_upload', source=source)
+    tl_service.notify_job_submitted(job_id, url or 'file_upload', source=source)
 
     return {"job_id": job_id, "status": "queued"}
 
@@ -1002,14 +1002,14 @@ async def generate_effects_config(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class SendTelegramRequest(BaseModel):
+class SendTLRequest(BaseModel):
     job_id: str
     clip_index: int
 
 
-@app.post("/api/jobs/send-telegram")
-async def send_clip_to_telegram(req: SendTelegramRequest):
-    """Send a specific clip to Telegram with its full metadata."""
+@app.post("/api/jobs/send-tl")
+async def send_clip_to_tl(req: SendTLRequest):
+    """Send a specific clip to TL with its full metadata."""
     if req.job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1044,7 +1044,7 @@ async def send_clip_to_telegram(req: SendTelegramRequest):
             pass
 
     def _do_send():
-        telegram_service.notify_clip_ready(
+        tl_service.notify_clip_ready(
             job_id=req.job_id,
             clip=clip,
             file_path=file_path,
@@ -1054,7 +1054,7 @@ async def send_clip_to_telegram(req: SendTelegramRequest):
         )
 
     threading.Thread(target=_do_send, daemon=True).start()
-    return {"success": True, "message": "Clip sent to Telegram"}
+    return {"success": True, "message": "Clip sent to TL"}
 
 
 @app.post("/api/subtitle")

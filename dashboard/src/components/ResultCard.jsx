@@ -60,8 +60,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [isSubtitling, setIsSubtitling] = useState(false);
     const [isHooking, setIsHooking] = useState(false);
     const [isTranslating, setIsTranslating] = useState(false);
-    const [isSendingToTelegram, setIsSendingToTelegram] = useState(false);
-    const [telegramResult, setTelegramResult] = useState(null);
+    const [isSendingToTL, setIsSendingToTL] = useState(false);
+    const [tlResult, setTLResult] = useState(null);
     const [showHookModal, setShowHookModal] = useState(false);
     const [showTranslateModal, setShowTranslateModal] = useState(false);
     const [editError, setEditError] = useState(null);
@@ -518,10 +518,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         {editError}
                     </div>
                 )}
-                {telegramResult && (
-                    <div className={`mb-3 p-2 rounded-lg text-[10px] flex items-center gap-2 ${telegramResult.success ? 'bg-green-500/10 border border-green-500/20 text-green-400' : 'bg-red-500/10 border border-red-500/20 text-red-400'}`}>
-                        {telegramResult.success ? <CheckCircle size={12} className="shrink-0" /> : <AlertCircle size={12} className="shrink-0" />}
-                        {telegramResult.msg}
+                {tlResult && (
+                    <div className={`mb-3 p-2 rounded-lg text-[10px] flex items-center gap-2 ${tlResult.success ? 'bg-green-500/10 border border-green-500/20 text-green-400' : 'bg-red-500/10 border border-red-500/20 text-red-400'}`}>
+                        {tlResult.success ? <CheckCircle size={12} className="shrink-0" /> : <AlertCircle size={12} className="shrink-0" />}
+                        {tlResult.msg}
                     </div>
                 )}
 
@@ -596,28 +596,28 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     </button>
                     <button
                         onClick={async () => {
-                            setIsSendingToTelegram(true);
-                            setTelegramResult(null);
+                            setIsSendingToTL(true);
+                            setTLResult(null);
                             try {
-                                const res = await fetch(getApiUrl('/api/jobs/send-telegram'), {
+                                const res = await fetch(getApiUrl('/api/jobs/send-tl'), {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ job_id: jobId, clip_index: index })
                                 });
                                 const data = await res.json();
-                                setTelegramResult({ success: res.ok, msg: data.message || (res.ok ? 'Sent!' : 'Failed') });
+                                setTLResult({ success: res.ok, msg: data.message || (res.ok ? 'Sent!' : 'Failed') });
                             } catch (err) {
-                                setTelegramResult({ success: false, msg: err.message });
+                                setTLResult({ success: false, msg: err.message });
                             } finally {
-                                setIsSendingToTelegram(false);
-                                setTimeout(() => setTelegramResult(null), 4000);
+                                setIsSendingToTL(false);
+                                setTimeout(() => setTLResult(null), 4000);
                             }
                         }}
-                        disabled={isSendingToTelegram}
+                        disabled={isSendingToTL}
                         className="col-span-1 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
                     >
-                        {isSendingToTelegram ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} className="shrink-0" />}
-                        {isSendingToTelegram ? 'Sending...' : 'Send to TG'}
+                        {isSendingToTL ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} className="shrink-0" />}
+                        {isSendingToTL ? 'Sending...' : 'Send to TL'}
                     </button>
                 </div>
             </div>

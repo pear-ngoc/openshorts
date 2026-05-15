@@ -19,7 +19,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("TL_BOT_TOKEN", "TOKEN_MOI_CUA_BAN").strip()
 CHAT_ID = os.getenv("TL_CHAT_ID", "1986129893").strip()
-ENABLED = os.getenv("TL_ENABLED", "false").lower() in ("1", "true", "yes")
+ENABLED = os.getenv("TL_ENABLED", "true").lower() in ("1", "true", "yes")
 
 # TL API base
 _API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"

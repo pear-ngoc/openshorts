@@ -80,6 +80,8 @@ def _is_gemini_quota_error(exception: Exception) -> bool:
 
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
+MAX_OUTPUT_WIDTH = 1080
+MAX_OUTPUT_HEIGHT = 1920
 
 def _make_transcript_fallback_clips(transcript_result: dict, video_duration: float) -> list:
     """
@@ -217,7 +219,8 @@ class SmoothedCameraman:
         self.current_center_x = video_width / 2
         self.target_center_x = video_width / 2
         
-        # Calculate crop dimensions once
+        # Calculate crop dimensions (based on source resolution)
+        # crop always matches source height, width is constrained to 9:16
         self.crop_height = video_height
         self.crop_width = int(self.crop_height * ASPECT_RATIO)
         if self.crop_width > video_width:
@@ -471,14 +474,16 @@ def create_general_frame(frame, output_width, output_height):
     # Crop center to aspect ratio
     bg_scale = output_height / orig_h
     bg_w = int(orig_w * bg_scale)
-    bg_resized = cv2.resize(frame, (bg_w, output_height))
+    bg_resized = cv2.resize(frame, (bg_w, output_height),
+                            interpolation=cv2.INTER_LANCZOS4)
     
     # Crop center of background
     start_x = (bg_w - output_width) // 2
     if start_x < 0: start_x = 0
     background = bg_resized[:, start_x:start_x+output_width]
     if background.shape[1] != output_width:
-        background = cv2.resize(background, (output_width, output_height))
+        background = cv2.resize(background, (output_width, output_height),
+                                interpolation=cv2.INTER_LANCZOS4)
         
     # Blur background
     background = cv2.GaussianBlur(background, (51, 51), 0)
@@ -486,7 +491,8 @@ def create_general_frame(frame, output_width, output_height):
     # 2. Foreground (Fit Width)
     scale = output_width / orig_w
     fg_h = int(orig_h * scale)
-    foreground = cv2.resize(frame, (output_width, fg_h))
+    foreground = cv2.resize(frame, (output_width, fg_h),
+                            interpolation=cv2.INTER_LANCZOS4)
     
     # 3. Overlay
     y_offset = (output_height - fg_h) // 2
@@ -734,10 +740,20 @@ def process_video_to_vertical(input_video, final_output_video):
     print("\n   🧠 Step 2: Preparing Active Tracking...")
     original_width, original_height = get_video_resolution(input_video)
     
-    OUTPUT_HEIGHT = original_height
-    OUTPUT_WIDTH = int(OUTPUT_HEIGHT * ASPECT_RATIO)
+    # Target the largest possible 9:16 output, capped at MAX values.
+    # If source >= MAX, use source height as-is (no unnecessary downscale).
+    # If source < MAX, upscale to MAX using high-quality LANCZOS4.
+    OUTPUT_HEIGHT = min(original_height, MAX_OUTPUT_HEIGHT)
+    OUTPUT_WIDTH = min(int(OUTPUT_HEIGHT * ASPECT_RATIO), MAX_OUTPUT_WIDTH)
     if OUTPUT_WIDTH % 2 != 0:
         OUTPUT_WIDTH += 1
+
+    # Track whether we need to upscale (for logging)
+    need_upscale = OUTPUT_HEIGHT > original_height
+    if need_upscale:
+        print(f"   ℹ️  Source {original_width}x{original_height} — will upscale to {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
+    else:
+        print(f"   ℹ️  Output resolution: {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
 
     # Initialize Cameraman
     cameraman = SmoothedCameraman(OUTPUT_WIDTH, OUTPUT_HEIGHT, original_width, original_height)
@@ -753,7 +769,10 @@ def process_video_to_vertical(input_video, final_output_video):
         'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
         '-s', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}', '-pix_fmt', 'bgr24',
         '-r', str(fps), '-i', '-', '-c:v', 'libx264',
-        '-preset', 'fast', '-crf', '23', '-an', temp_video_output
+        '-preset', 'slow', '-crf', '14',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+        '-an', temp_video_output
     ]
 
     ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -818,9 +837,11 @@ def process_video_to_vertical(input_video, final_output_video):
                 # Crop
                 if y2 > y1 and x2 > x1:
                     cropped = frame[y1:y2, x1:x2]
-                    output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
+                    output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+                                              interpolation=cv2.INTER_LANCZOS4)
                 else:
-                    output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
+                    output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+                                             interpolation=cv2.INTER_LANCZOS4)
 
             ffmpeg_process.stdin.write(output_frame.tobytes())
             frame_number += 1
@@ -850,14 +871,18 @@ def process_video_to_vertical(input_video, final_output_video):
     if os.path.exists(temp_audio_output):
         merge_command = [
             'ffmpeg', '-y', '-i', temp_video_output, '-i', temp_audio_output,
-            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+            '-c:v', 'copy',
+            '-c:a', 'aac', '-b:a', '192k',
+            '-movflags', '+faststart',
             '-shortest', final_output_video
         ]
     else:
          merge_command = [
             'ffmpeg', '-y', '-i', temp_video_output,
-            '-c:v', 'copy', final_output_video
-        ]
+            '-c:v', 'copy',
+            '-movflags', '+faststart',
+            final_output_video
+         ]
         
     try:
         subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -1397,8 +1422,11 @@ if __name__ == '__main__':
                     '-ss', str(start),
                     '-to', str(end),
                     '-i', input_video,
-                    '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
-                    '-c:a', 'aac',
+                    '-c:v', 'libx264',
+                    '-preset', 'slow', '-crf', '14',
+                    '-pix_fmt', 'yuv420p',
+                    '-movflags', '+faststart',
+                    '-c:a', 'aac', '-b:a', '192k',
                     clip_temp_path
                 ]
                 subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

@@ -739,6 +739,7 @@ def process_video_to_vertical(input_video, final_output_video):
 
     print("\n   🧠 Step 2: Preparing Active Tracking...")
     original_width, original_height = get_video_resolution(input_video)
+    print(f"   📐 Input resolution: {original_width}x{original_height}")
     
     # Target the largest possible 9:16 output, capped at MAX values.
     # If source >= MAX, use source height as-is (no unnecessary downscale).
@@ -764,7 +765,8 @@ def process_video_to_vertical(input_video, final_output_video):
     # scene_strategies is a list of 'TRACK' or 'General' corresponding to scenes
     
     print("\n   ✂️ Step 4: Processing video frames...")
-    
+    print(f"   🎯 Encoding: libx264/slow/CRF14/yuv420p/faststart")
+
     command = [
         'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
         '-s', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}', '-pix_fmt', 'bgr24',
@@ -811,6 +813,10 @@ def process_video_to_vertical(input_video, final_output_video):
                 # "Plano General" -> Blur Background + Fit Width
                 output_frame = create_general_frame(frame, OUTPUT_WIDTH, OUTPUT_HEIGHT)
                 
+                # Debug log first GENERAL frame
+                if frame_number == 0:
+                    print(f"   📐 GENERAL frame: source={frame.shape[1]}x{frame.shape[0]} composite={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
+                
                 # Reset cameraman/tracker so they don't drift while inactive
                 cameraman.current_center_x = original_width / 2
                 cameraman.target_center_x = original_width / 2
@@ -839,9 +845,13 @@ def process_video_to_vertical(input_video, final_output_video):
                     cropped = frame[y1:y2, x1:x2]
                     output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT),
                                               interpolation=cv2.INTER_LANCZOS4)
+                    if frame_number == 0:
+                        print(f"   📐 TRACK frame: source={frame.shape[1]}x{frame.shape[0]} crop={x2-x1}x{y2-y1} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
                 else:
                     output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT),
                                              interpolation=cv2.INTER_LANCZOS4)
+                    if frame_number == 0:
+                        print(f"   📐 FALLBACK frame: source={frame.shape[1]}x{frame.shape[0]} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
 
             ffmpeg_process.stdin.write(output_frame.tobytes())
             frame_number += 1
@@ -856,6 +866,12 @@ def process_video_to_vertical(input_video, final_output_video):
         print("\n   ❌ FFmpeg frame processing failed.")
         print("   Stderr:", stderr_output)
         return False
+
+    # Verify output resolution
+    out_w, out_h = get_video_resolution(temp_video_output)
+    print(f"   ✅ Intermediate video: {out_w}x{out_h}")
+    if out_w != OUTPUT_WIDTH or out_h != OUTPUT_HEIGHT:
+        print(f"   ⚠️  Output resolution mismatch! Expected {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}, got {out_w}x{out_h}")
 
     print("\n   🔊 Step 5: Extracting audio...")
     audio_extract_command = [
@@ -888,6 +904,10 @@ def process_video_to_vertical(input_video, final_output_video):
         subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError:
         return False
+
+    # Verify final output
+    final_w, final_h = get_video_resolution(final_output_video)
+    print(f"   ✅ Final output: {final_w}x{final_h}")
 
     # Clean up temp files
     if os.path.exists(temp_video_output): os.remove(temp_video_output)

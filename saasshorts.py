@@ -1012,8 +1012,9 @@ def generate_broll(
         "-vf", zoompan_filter,
         "-t", str(dur_secs),
         "-map", "0:v", "-map", "1:a",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "14",
         "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         "-c:a", "aac", "-b:a", "128k",
         "-shortest",
         output_path,
@@ -1249,7 +1250,7 @@ def composite_video(
     concat_parts = []
 
     # Normalize all segments to same resolution and fps for concat
-    norm = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30,setsar=1"
+    norm = "scale=1080:1920:flags=lanczos+accurate_rnd:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30,setsar=1"
 
     for j, seg in enumerate(segments):
         if seg["type"] == "th":
@@ -1287,7 +1288,9 @@ def composite_video(
         "-filter_complex", filter_str,
         "-map", "[finalv]",
         "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "14",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         "-c:a", "aac", "-b:a", "128k",
         output_path,
     ]

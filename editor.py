@@ -418,7 +418,10 @@ Output format:
             'ffmpeg', '-y',
             '-i', input_path,
             '-vf', filter_string,
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+            '-c:v', 'libx264',
+            '-preset', 'slow', '-crf', '14',
+            '-pix_fmt', 'yuv420p',
+            '-movflags', '+faststart',
             '-c:a', 'copy',
             output_path
         ]

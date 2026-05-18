@@ -164,7 +164,7 @@ function App() {
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
-  const [logs, setLogs] = useState([]);
+  const [logs, setLogs] = useState([]); // [{text: string, time: Date}, ...]
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
   const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, settings
@@ -309,11 +309,18 @@ function App() {
           } else if (data.status === 'failed') {
             setStatus('error');
             const errorMsg = data.error || (data.logs && data.logs.length > 0 ? data.logs[data.logs.length - 1] : "Process failed");
-            setLogs(prev => [...prev, "Error: " + errorMsg]);
+            setLogs(prev => [...prev, { text: "Error: " + errorMsg, time: new Date() }]);
             clearInterval(interval);
           } else {
-            // Update logs if available
-            if (data.logs) setLogs(data.logs);
+            // Merge: keep existing logs with timestamps, append only new entries
+            if (data.logs) {
+              setLogs(prev => {
+                const existingCount = prev.length;
+                if (data.logs.length <= existingCount) return prev;
+                const newEntries = data.logs.slice(existingCount).map(text => ({ text, time: new Date() }));
+                return [...prev, ...newEntries];
+              });
+            }
           }
         } catch (e) {
           console.error("Polling error", e);
@@ -353,7 +360,7 @@ function App() {
       return;
     }
     setStatus('processing');
-    setLogs(["Starting process..."]);
+    setLogs([{ text: "Starting process...", time: new Date() }]);
     setResults(null);
     setProcessingMedia(data);
 
@@ -392,7 +399,7 @@ function App() {
 
     } catch (e) {
       setStatus('error');
-      setLogs(l => [...l, `Error starting job: ${e.message}`]);
+      setLogs(l => [...l, { text: `Error starting job: ${e.message}`, time: new Date() }]);
     }
   };
 
@@ -972,9 +979,9 @@ function App() {
                   {logsVisible && (
                     <div className="flex-1 p-4 overflow-y-auto font-mono text-xs space-y-1.5 custom-scrollbar text-zinc-400">
                       {logs.map((log, i) => (
-                        <div key={i} className={`flex gap-2 ${log.toLowerCase().includes('error') ? 'text-red-400' : 'text-zinc-400'}`}>
-                          <span className="text-zinc-700 shrink-0">{new Date().toLocaleTimeString()}</span>
-                          <span>{log}</span>
+                        <div key={i} className={`flex gap-2 ${log.text.toLowerCase().includes('error') ? 'text-red-400' : 'text-zinc-400'}`}>
+                          <span className="text-zinc-700 shrink-0">{log.time.toLocaleTimeString()}</span>
+                          <span>{log.text}</span>
                         </div>
                       ))}
                       {status === 'processing' && (

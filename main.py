@@ -28,6 +28,116 @@ warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf'
 # Load environment variables FIRST so module-level env reads pick up .env values
 load_dotenv()
 
+# ─── FFmpeg encoder detection ────────────────────────────────────────────────
+def _detect_nvenc():
+    """
+    Check two things before enabling hardware encoding:
+    1. FFmpeg was compiled with h264_nvenc support.
+    2. The CUDA driver (libcuda.so.1) is actually loadable at runtime.
+       Even when FFmpeg includes the encoder, it fails at execution if
+       no GPU/driver is present (common in containers without a GPU).
+    """
+    try:
+        encoders = subprocess.check_output(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            stderr=subprocess.STDOUT,
+        ).decode(errors="ignore")
+        has_encoder = "h264_nvenc" in encoders
+    except Exception:
+        has_encoder = False
+
+    if not has_encoder:
+        return False
+
+    # Confirm libcuda.so.1 is loadable — avoids "Cannot load libcuda.so.1" at encode time.
+    try:
+        subprocess.check_output(
+            ["ldconfig", "-p"],
+            stderr=subprocess.DEVNULL,
+        ).decode(errors="ignore")
+        cuda_libs = subprocess.check_output(
+            ["ldconfig", "-p"],
+            stderr=subprocess.DEVNULL,
+        ).decode(errors="ignore")
+        has_cuda = "libcuda.so" in cuda_libs
+    except Exception:
+        has_cuda = False
+
+    return has_cuda
+
+HAS_NVENC = _detect_nvenc()
+print("NVENC available:", HAS_NVENC)
+
+# Chế độ test: chỉ render clip đầu tiên rồi dừng (set IS_TEST_MODE=true trong .env)
+IS_TEST_MODE = os.getenv("IS_TEST_MODE", "false").lower() in ("1", "true", "yes")
+if IS_TEST_MODE:
+    print("⚠️  TEST MODE: chỉ render clip đầu tiên")
+
+
+def _encoder_args():
+    """
+    Args cho video encoder chất lượng cao.
+    NVENC ưu tiên vì tốc độ + chất lượng; CPU fallback dùng veryslow CRF 18.
+    """
+    if HAS_NVENC:
+        return [
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-cq", "18",
+            "-rc:v", "vbr",
+            "-pix_fmt", "yuv420p",
+        ]
+    return [
+        "-c:v", "libx264",
+        "-preset", "veryslow",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "high",
+        "-level", "4.2",
+    ]
+
+
+def run_cmd(cmd, quiet=False, allow_fail=False):
+    """Chạy lệnh FFmpeg, log ra console, raise RuntimeError nếu thất bại."""
+    if not quiet:
+        print(" ".join(map(str, cmd)))
+    try:
+        return subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL if quiet else None,
+            stderr=subprocess.PIPE if quiet else None,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        if allow_fail:
+            return e
+        stderr = e.stderr[-3000:] if isinstance(e.stderr, str) else e.stderr
+        raise RuntimeError(
+            f"Command failed:\n{' '.join(map(str, cmd))}\n\n{stderr}"
+        ) from e
+
+
+def cut_clip_30fps(input_video, output_video, start, duration):
+    """
+    Cắt clip trong một pass duy nhất: cut + chuẩn hóa FPS + audio AAC.
+    -ss trước -i = fast input seeking (seek từ đầu input, nhanh hơn output seeking).
+    target FPS và encoder lấy từ CONFIG / _encoder_args().
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(start),
+        "-i", str(input_video),
+        "-t", str(duration),
+        "-r", "30",
+        *_encoder_args(),
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(output_video),
+    ]
+    run_cmd(cmd, quiet=True)
+
 # Notification — gracefully absent if module not available
 try:
     import notification_service
@@ -493,15 +603,24 @@ def create_general_frame(frame, output_width, output_height):
     fg_h = int(orig_h * scale)
     foreground = cv2.resize(frame, (output_width, fg_h),
                             interpolation=cv2.INTER_LANCZOS4)
-    
+    foreground = unsharp_mask(foreground)
     # 3. Overlay
     y_offset = (output_height - fg_h) // 2
     
     # Clone background to avoid modifying it
     final_frame = background.copy()
     final_frame[y_offset:y_offset+fg_h, :] = foreground
-    
     return final_frame
+
+def unsharp_mask(frame, amount=1.5, threshold=0):
+    """
+    Unsharp mask mạnh hơn Laplacian kernel cũ.
+    Bù độ mờ từ downscale/crop để giữ nét chi tiết.
+    amount=1.5–2.0 là mạnh, threshold=0 áp dụng cho mọi edge difference.
+    """
+    blurred = cv2.GaussianBlur(frame, (0, 0), 3)
+    lowcontrast = cv2.addWeighted(frame, 1.0, blurred, -1.0, 0)
+    return cv2.addWeighted(frame, 1.0, lowcontrast, amount, 0)
 
 def analyze_scenes_strategy(video_path, scenes):
     """
@@ -543,7 +662,7 @@ def analyze_scenes_strategy(video_path, scenes):
         # 1 face -> TRACK
         # > 1.2 faces -> GENERAL (Group)
         
-        if avg_faces > 1.2 or avg_faces < 0.5:
+        if avg_faces > 2.5:
             strategies.append('GENERAL')
         else:
             strategies.append('TRACK')
@@ -684,7 +803,13 @@ Technical Details: {str(e)}
     
     ydl_opts = {
         **_COMMON_YDL_OPTS,
-        'format': 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio/best[ext=mp4]/best',
+        'format': (
+            'bestvideo[height>=2160]+bestaudio/'
+            'bestvideo[height>=1440]+bestaudio/'
+            'bestvideo[height>=1080]+bestaudio/'
+            'bestvideo+bestaudio/'
+            'best'
+        ),
         'outtmpl': output_template,
         'merge_output_format': 'mp4',
         'overwrites': True,
@@ -703,6 +828,12 @@ Technical Details: {str(e)}
     
     step_end_time = time.time()
     print(f"✅ Video downloaded in {step_end_time - step_start_time:.2f}s: {downloaded_file}")
+
+    try:
+        w, h = get_video_resolution(downloaded_file)
+        print(f"📐 Downloaded/input resolution: {w}x{h}")
+    except Exception as e:
+        print(f"⚠️ Could not read downloaded video resolution: {e}")
     
     return downloaded_file, sanitized_title
 
@@ -744,10 +875,12 @@ def process_video_to_vertical(input_video, final_output_video):
     # Target the largest possible 9:16 output, capped at MAX values.
     # If source >= MAX, use source height as-is (no unnecessary downscale).
     # If source < MAX, upscale to MAX using high-quality LANCZOS4.
-    OUTPUT_HEIGHT = min(original_height, MAX_OUTPUT_HEIGHT)
-    OUTPUT_WIDTH = min(int(OUTPUT_HEIGHT * ASPECT_RATIO), MAX_OUTPUT_WIDTH)
-    if OUTPUT_WIDTH % 2 != 0:
-        OUTPUT_WIDTH += 1
+    # OUTPUT_HEIGHT = min(original_height, MAX_OUTPUT_HEIGHT)
+    # OUTPUT_WIDTH = min(int(OUTPUT_HEIGHT * ASPECT_RATIO), MAX_OUTPUT_WIDTH)
+    # if OUTPUT_WIDTH % 2 != 0:
+    #     OUTPUT_WIDTH += 1
+    OUTPUT_WIDTH = 1080
+    OUTPUT_HEIGHT = 1920
 
     # Track whether we need to upscale (for logging)
     need_upscale = OUTPUT_HEIGHT > original_height
@@ -765,16 +898,30 @@ def process_video_to_vertical(input_video, final_output_video):
     # scene_strategies is a list of 'TRACK' or 'General' corresponding to scenes
     
     print("\n   ✂️ Step 4: Processing video frames...")
-    print(f"   🎯 Encoding: libx264/slow/CRF14/yuv420p/faststart")
+    encoder_label = "h264_nvenc/p4/CQ18/VBR" if HAS_NVENC else "libx264/veryslow/CRF18"
+    print(f"   🎯 Encoding: {encoder_label}/yuv420p/faststart")
 
+    # command = [
+    #     'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+    #     '-s', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}', '-pix_fmt', 'bgr24',
+    #     '-r', str(fps), '-i', '-', '-c:v', 'libx264',
+    #     '-preset', 'slow', '-crf', '14',
+    #     '-pix_fmt', 'yuv420p',
+    #     '-movflags', '+faststart',
+    #     '-an', temp_video_output
+    # ]
     command = [
-        'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
-        '-s', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}', '-pix_fmt', 'bgr24',
-        '-r', str(fps), '-i', '-', '-c:v', 'libx264',
-        '-preset', 'slow', '-crf', '14',
-        '-pix_fmt', 'yuv420p',
+        'ffmpeg', '-y',
+        '-f', 'rawvideo',
+        '-vcodec', 'rawvideo',
+        '-s', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}',
+        '-pix_fmt', 'bgr24',
+        '-r', str(fps),
+        '-i', '-',
+        *_encoder_args(),
         '-movflags', '+faststart',
-        '-an', temp_video_output
+        '-an',
+        temp_video_output
     ]
 
     ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -843,13 +990,25 @@ def process_video_to_vertical(input_video, final_output_video):
                 # Crop
                 if y2 > y1 and x2 > x1:
                     cropped = frame[y1:y2, x1:x2]
-                    output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT),
-                                              interpolation=cv2.INTER_LANCZOS4)
+                    # output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+                    #                           interpolation=cv2.INTER_LANCZOS4)
+                    output_frame = cv2.resize(
+                        cropped,
+                        (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+                        interpolation=cv2.INTER_LANCZOS4
+                    )
+                    output_frame = unsharp_mask(output_frame)
                     if frame_number == 0:
                         print(f"   📐 TRACK frame: source={frame.shape[1]}x{frame.shape[0]} crop={x2-x1}x{y2-y1} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
                 else:
-                    output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT),
-                                             interpolation=cv2.INTER_LANCZOS4)
+                    # output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+                    #                          interpolation=cv2.INTER_LANCZOS4)
+                    output_frame = cv2.resize(
+                        frame,
+                        (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+                        interpolation=cv2.INTER_LANCZOS4
+                    )
+                    output_frame = unsharp_mask(output_frame)
                     if frame_number == 0:
                         print(f"   📐 FALLBACK frame: source={frame.shape[1]}x{frame.shape[0]} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
 
@@ -1435,21 +1594,8 @@ if __name__ == '__main__':
                 clip_temp_path = os.path.join(output_dir, f"temp_{clip_filename}")
                 clip_final_path = os.path.join(output_dir, clip_filename)
 
-                # ffmpeg cut
-                # Using re-encoding for precision as requested by strict seconds
-                cut_command = [
-                    'ffmpeg', '-y',
-                    '-ss', str(start),
-                    '-to', str(end),
-                    '-i', input_video,
-                    '-c:v', 'libx264',
-                    '-preset', 'slow', '-crf', '14',
-                    '-pix_fmt', 'yuv420p',
-                    '-movflags', '+faststart',
-                    '-c:a', 'aac', '-b:a', '192k',
-                    clip_temp_path
-                ]
-                subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                # Một pass: cut + chuẩn hóa FPS + encode audio
+                cut_clip_30fps(input_video, clip_temp_path, start, end - start)
 
                 # Process vertical
                 success = process_video_to_vertical(clip_temp_path, clip_final_path)
@@ -1475,6 +1621,11 @@ if __name__ == '__main__':
                 # Clean up temp cut
                 if os.path.exists(clip_temp_path):
                     os.remove(clip_temp_path)
+
+                # Test mode: chỉ render clip đầu tiên rồi dừng
+                if IS_TEST_MODE:
+                    print("   ⚠️  TEST MODE: dừng sau clip đầu tiên")
+                    break
 
             # Save metadata AFTER all clips are processed so it reflects actual results.
             # Named with job_id prefix so app.py's rescue pattern can find it.

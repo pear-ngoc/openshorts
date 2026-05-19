@@ -741,7 +741,7 @@ def download_youtube_video(url, output_dir="."):
 
     return downloaded_file, sanitized_title
 
-def process_video_to_vertical(input_video, final_output_video, _temp_video_output_path=None):
+def process_video_to_vertical(input_video, final_output_video, temp_video_output_path=None):
     """
     Core logic to convert horizontal video to vertical using scene detection and Active Speaker Tracking (MediaPipe).
     """
@@ -751,12 +751,12 @@ def process_video_to_vertical(input_video, final_output_video, _temp_video_outpu
     # Use temp_ prefix so uploaders skip these intermediates.
     out_dir = os.path.dirname(final_output_video) or "."
     out_stem = os.path.splitext(os.path.basename(final_output_video))[0]
-    __temp_video_output = _temp_video_output_path or os.path.join(out_dir, f"temp_{out_stem}.mp4")
+    _temp_video_output = temp_video_output_path or os.path.join(out_dir, f"temp_{out_stem}.mp4")
     temp_audio_output = os.path.join(out_dir, f"temp_{out_stem}.aac")
 
     # Clean up previous temp files if they exist (don't delete the input!)
-    if __temp_video_output != input_video and os.path.exists(__temp_video_output):
-        os.remove(__temp_video_output)
+    if _temp_video_output != input_video and os.path.exists(_temp_video_output):
+        os.remove(_temp_video_output)
     if os.path.exists(temp_audio_output):
         os.remove(temp_audio_output)
     if os.path.exists(final_output_video):

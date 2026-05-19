@@ -124,42 +124,140 @@ def cut_clip_30fps(input_video, output_video, start, duration):
     Cắt clip: output seeking (-ss sau -i) cho frame-accurate + re-encode qua
     libx264 baseline để fix partial-file corruption từ input seeking.
     """
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(input_video),
-        "-ss", str(start),
-        "-t", str(duration),
-        "-r", "30",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-profile:v", "baseline",
-        "-level", "3.0",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        str(output_video),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"FFmpeg cut failed (exit {result.returncode}):\n"
-            f"cmd: {' '.join(cmd)}\n\n"
-            f"{result.stderr[-5000:]}"
-        )
+    def _get_video_duration(video_path: str) -> float:
+        """Get video duration in seconds via ffprobe."""
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            video_path
+        ]
+        try:
+            result = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode().strip()
+            return float(result) if result else 0.0
+        except Exception:
+            return 0.0
+
+    def _encode_then_remux(seek_mode: str) -> tuple[int, str, str]:
+        """Return (returncode, stderr_tail, produced_path)."""
+        tmp_encoded = f"{output_video}.encoded.tmp.mp4"
+        tmp_final = f"{output_video}.remux.tmp.mp4"
+        for p in (tmp_encoded, tmp_final):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+
+        # Prefer input seeking for stability; fall back to output seeking for accuracy.
+        if seek_mode == "input":
+            seek_args = ["-ss", str(start), "-i", str(input_video), "-t", str(duration)]
+        else:
+            seek_args = ["-i", str(input_video), "-ss", str(start), "-t", str(duration)]
+
+        encode_cmd = [
+            'ffmpeg', '-hide_banner', '-y',
+            # Avoid blocking on stdin in rare cases
+            '-nostdin',
+            # Keep stderr available for diagnostics while not being too chatty
+            '-loglevel', 'warning',
+            *seek_args,
+            # Be explicit about stream selection to avoid odd extra tracks
+            '-map', '0:v:0',
+            '-map', '0:a:0?',
+            '-sn', '-dn',
+            # Force CFR 30fps via filter (more reliable than -r for timestamping)
+            '-vf', 'fps=30,format=yuv420p',
+            '-c:v', 'libx264',
+            '-preset', 'fast',
+            '-crf', '18',
+            '-pix_fmt', 'yuv420p',
+            # Use a sane level for 1080p+ sources
+            '-profile:v', 'high',
+            '-level', '4.2',
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            # Timestamp/muxing hygiene
+            '-fflags', '+genpts',
+            '-avoid_negative_ts', 'make_zero',
+            '-movflags', '+faststart',
+            tmp_encoded,
+        ]
+        encode_res = subprocess.run(encode_cmd, capture_output=True, text=True)
+        stderr_tail = (encode_res.stderr or '')[-5000:]
+        if encode_res.returncode != 0 or not os.path.exists(tmp_encoded) or os.path.getsize(tmp_encoded) == 0:
+            return encode_res.returncode or 1, stderr_tail, tmp_encoded
+
+        # Remux to ensure a clean MP4 (moov atom, indexes) for OpenCV/FFmpeg demuxers.
+        remux_cmd = [
+            'ffmpeg', '-hide_banner', '-y', '-nostdin',
+            '-loglevel', 'warning',
+            '-i', tmp_encoded,
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            tmp_final,
+        ]
+        remux_res = subprocess.run(remux_cmd, capture_output=True, text=True)
+        stderr_tail = ((stderr_tail + "\n" + (remux_res.stderr or '')))[-5000:]
+        if remux_res.returncode != 0 or not os.path.exists(tmp_final) or os.path.getsize(tmp_final) == 0:
+            return remux_res.returncode or 1, stderr_tail, tmp_final
+
+        # Cleanup tmp_encoded; keep tmp_final for the caller to validate/move.
+        try:
+            os.remove(tmp_encoded)
+        except OSError:
+            pass
+
+        return 0, stderr_tail, tmp_final
+
+    expected = float(duration) if duration is not None else 0.0
+    # Primary attempt: input seeking (more stable for many MP4s)
+    rc, stderr_tail, produced = _encode_then_remux("input")
+    if rc != 0:
+        # Fallback: output seeking (frame-accurate)
+        rc2, stderr_tail2, produced2 = _encode_then_remux("output")
+        if rc2 != 0:
+            raise RuntimeError(
+                "FFmpeg cut failed in both seek modes.\n"
+                f"input={input_video}\noutput={output_video}\nstart={start}\nduration={duration}\n\n"
+                f"stderr (tail):\n{(stderr_tail + '\n' + stderr_tail2)[-8000:]}"
+            )
+        rc, stderr_tail, produced = rc2, stderr_tail2, produced2
+
+    # Validate duration; ffmpeg can exit 0 but still output a ~1s broken clip.
+    actual = _get_video_duration(produced)
+    if expected >= 10 and actual < max(2.0, expected * 0.80):
+        # Retry with output seeking if we haven't already.
+        rc2, stderr_tail2, produced2 = _encode_then_remux("output")
+        actual2 = _get_video_duration(produced2) if rc2 == 0 else 0.0
+        if rc2 != 0 or actual2 < max(2.0, expected * 0.80):
+            raise RuntimeError(
+                "FFmpeg cut produced a suspiciously short clip.\n"
+                f"expected~{expected:.1f}s, got {actual:.2f}s\n"
+                f"input={input_video}\noutput={output_video}\nstart={start}\n\n"
+                f"stderr (tail):\n{(stderr_tail + '\n' + stderr_tail2)[-8000:]}"
+            )
+        # Replace with the better retry
+        try:
+            os.remove(produced)
+        except OSError:
+            pass
+        produced, actual, stderr_tail = produced2, actual2, stderr_tail2
+
+    # Move final artifact into place atomically.
+    os.makedirs(os.path.dirname(str(output_video)) or '.', exist_ok=True)
+    os.replace(produced, output_video)
+
     if not os.path.exists(output_video):
         raise RuntimeError(
             f"FFmpeg returned success but output file was not created: {output_video}\n"
-            f"cmd: {' '.join(cmd)}\n\n"
-            f"{result.stderr[-5000:]}"
+            f"stderr (tail):\n{stderr_tail[-5000:]}"
         )
     size = os.path.getsize(output_video)
     if size == 0:
         raise RuntimeError(
             f"FFmpeg output file is 0 bytes: {output_video}\n"
-            f"cmd: {' '.join(cmd)}\n\n"
-            f"{result.stderr[-5000:]}"
+            f"stderr (tail):\n{stderr_tail[-5000:]}"
         )
 
 # Notification — gracefully absent if module not available
@@ -964,8 +1062,12 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
         if output_frame_count == 0:
             print(f"\n   ❌ FFmpeg output has 0 frames. Stderr: {stderr_output[-2000:]}")
             return False
-        if output_frame_count < total_frames * 0.9:
+        if total_frames > 0 and output_frame_count < total_frames * 0.9:
             print(f"   ⚠️  Output frames ({output_frame_count}) < 90% of input frames ({total_frames}) — input may be corrupted")
+            # If we're *way* under, fail fast: otherwise we silently produce ~1s videos.
+            if output_frame_count < max(30, int(total_frames * 0.2)):
+                print("   ❌ Too few frames decoded from input; treating as corruption.")
+                return False
 
         # Verify output resolution
         out_w, out_h = get_video_resolution(_temp_video_output)
@@ -1013,8 +1115,9 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
         final_w, final_h = get_video_resolution(final_output_video)
         final_duration = final_frame_count / final_fps if final_fps > 0 else 0
         print(f"   ✅ Final output: {final_w}x{final_h}, {final_frame_count} frames, {final_duration:.1f}s @ {final_fps}fps")
-        if final_duration < 5:
+        if final_duration < 5 and final_frame_count < 150:
             print(f"   ❌ Final video is suspiciously short ({final_duration:.1f}s). The input clip may be corrupted.")
+            return False
 
         return True
 

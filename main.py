@@ -137,7 +137,26 @@ def cut_clip_30fps(input_video, output_video, start, duration):
         "-movflags", "+faststart",
         str(output_video),
     ]
-    run_cmd(cmd, quiet=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"FFmpeg cut failed (exit {result.returncode}):\n"
+            f"cmd: {' '.join(cmd)}\n\n"
+            f"{result.stderr[-5000:]}"
+        )
+    if not os.path.exists(output_video):
+        raise RuntimeError(
+            f"FFmpeg returned success but output file was not created: {output_video}\n"
+            f"cmd: {' '.join(cmd)}\n\n"
+            f"{result.stderr[-5000:]}"
+        )
+    size = os.path.getsize(output_video)
+    if size == 0:
+        raise RuntimeError(
+            f"FFmpeg output file is 0 bytes: {output_video}\n"
+            f"cmd: {' '.join(cmd)}\n\n"
+            f"{result.stderr[-5000:]}"
+        )
 
 # Notification — gracefully absent if module not available
 try:
@@ -1560,6 +1579,10 @@ if __name__ == '__main__':
                 end = clip['end']
                 print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
                 print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
+                if not os.path.exists(input_video):
+                    raise FileNotFoundError(f"Input video does not exist: {input_video}")
+                input_size = os.path.getsize(input_video) / (1024*1024)
+                print(f"   Input: {input_video} ({input_size:.1f} MB)")
                 if notification_service:
                     notification_service.notify_step(job_id_from_dir, f"Cutting clip {i+1}", f"{start}s - {end}s")
 
@@ -1574,7 +1597,19 @@ if __name__ == '__main__':
                 print(f"   ✂️  Cutting clip (FFmpeg, 30fps, {cut_encoder_label})...")
                 cut_clip_30fps(input_video, clip_temp_path, start, end - start)
                 cut_end_time = time.time()
-                print(f"   ✅ Cut done in {cut_end_time - cut_start_time:.2f}s: {clip_temp_path}")
+
+                if not os.path.exists(clip_temp_path):
+                    raise FileNotFoundError(
+                        f"FFmpeg cut completed but output file is missing: {clip_temp_path}"
+                        f" — input={input_video}, start={start}, duration={end - start}"
+                    )
+                output_size_mb = os.path.getsize(clip_temp_path) / (1024 * 1024)
+                if output_size_mb < 0.1:
+                    raise RuntimeError(
+                        f"FFmpeg output file is suspiciously small ({output_size_mb:.1f} MB): {clip_temp_path}"
+                    )
+
+                print(f"   ✅ Cut done in {cut_end_time - cut_start_time:.2f}s ({output_size_mb:.1f} MB): {clip_temp_path}")
 
                 # Process vertical
                 success = process_video_to_vertical(clip_temp_path, clip_final_path)

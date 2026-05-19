@@ -109,6 +109,17 @@ class YtsaveService(YouTubeServiceBase):
         """Download video via ytsave 3-step flow."""
         import urllib.parse
 
+        debug = os.environ.get("YTSAVE_DEBUG", "").strip().lower() in ("1", "true", "yes", "y", "on")
+
+        def _is_waiting_file_url(u: str) -> bool:
+            s = (u or "").strip().lower()
+            if not s:
+                return True
+            # Common placeholders observed from ytsave
+            if s.startswith("waiting"):
+                return True
+            return False
+
         def _post_with_retries(client: httpx.Client, data: str, *, attempts: int = 4) -> httpx.Response:
             last_exc: Exception | None = None
             for i in range(max(1, attempts)):
@@ -175,6 +186,11 @@ class YtsaveService(YouTubeServiceBase):
             poll_seconds = float(os.environ.get("YTSAVE_POLL_SECONDS", "5"))
             deadline = time.time() + max_wait_seconds
 
+            # Throttled progress logs so it doesn't look "stuck" while queued
+            last_progress_log = 0.0
+            progress_log_interval = float(os.environ.get("YTSAVE_PROGRESS_LOG_SECONDS", "15"))
+            poll_count = 0
+
             last_api2 = None
             while True:
                 resp2 = _post_with_retries(client, f"url={media_url_encoded}")
@@ -182,13 +198,47 @@ class YtsaveService(YouTubeServiceBase):
                 api2 = data2.get("api", {})
                 last_api2 = api2
 
+                poll_count += 1
+
                 status = str(api2.get("status") or "").strip().lower()
                 file_url = str(api2.get("fileUrl") or "").strip()
-                if status == "completed" and file_url and file_url.lower() != "waiting...":
+                # Some responses may provide a real URL even if status isn't updated yet.
+                # Treat any http(s) URL as ready as long as it's not a placeholder.
+                if file_url and not _is_waiting_file_url(file_url) and (
+                    status == "completed" or file_url.lower().startswith("http")
+                ):
                     break
 
                 # Typical non-terminal states: queued / processing / waiting
                 if status in ("queued", "processing", "waiting", "running"):
+                    now = time.time()
+                    if poll_count == 1 or (now - last_progress_log) >= progress_log_interval:
+                        last_progress_log = now
+                        pos = api2.get("position")
+                        total = api2.get("totalWaiting")
+                        percent = api2.get("percent") or api2.get("progress")
+                        est = api2.get("estimatedFileSize")
+                        parts = [f"status={status}"]
+                        if percent:
+                            parts.append(f"{percent}")
+                        if pos is not None and total is not None:
+                            parts.append(f"queue={pos}/{total}")
+                        if est:
+                            parts.append(f"est={est}")
+                        print("   ⏳ Ytsave: " + " ".join(parts))
+
+                        if debug:
+                            # Keep it short; just show keys that help debug readiness
+                            dbg = {
+                                "status": api2.get("status"),
+                                "fileUrl": api2.get("fileUrl"),
+                                "fileName": api2.get("fileName"),
+                                "percent": api2.get("percent"),
+                                "progress": api2.get("progress"),
+                                "position": api2.get("position"),
+                                "totalWaiting": api2.get("totalWaiting"),
+                            }
+                            print(f"   🐞 Ytsave api2: {dbg}")
                     if time.time() >= deadline:
                         raise RuntimeError(f"Ytsave step 2 timeout after {max_wait_seconds}s: {api2}")
                     time.sleep(max(1.0, poll_seconds))

@@ -744,8 +744,17 @@ def process_video_to_vertical(input_video, final_output_video):
         os.remove(final_output_video)
 
     print(f"🎬 Processing clip: {input_video}")
+    if not os.path.exists(input_video):
+        raise FileNotFoundError(f"Video file does not exist: {input_video}")
+    file_size = os.path.getsize(input_video)
+    print(f"   File exists: {file_size / (1024*1024):.1f} MB")
     print("   Step 1: Detecting scenes...")
-    scenes, fps = detect_scenes(input_video)
+    try:
+        scenes, fps = detect_scenes(input_video)
+    except OSError as e:
+        if "not found" in str(e).lower() or "not exist" in str(e).lower():
+            raise FileNotFoundError(f"scenedetect cannot read video (file may be corrupt): {input_video} ({file_size} bytes)") from e
+        raise
     
     if not scenes:
         print("   ❌ No scenes were detected. Using full video as one scene.")

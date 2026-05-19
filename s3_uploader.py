@@ -4,6 +4,7 @@ load_dotenv()
 import boto3
 from botocore.exceptions import ClientError
 import logging
+from botocore.config import Config
 
 # Configure silent logging for boto3 and botocore
 logging.getLogger('boto3').setLevel(logging.CRITICAL)
@@ -13,23 +14,31 @@ logging.getLogger('s3transfer').setLevel(logging.CRITICAL)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _s3_endpoint_url() -> str:
+    return (os.environ.get("AWS_S3_ENDPOINT_URL") or os.environ.get("AWS_S3_ENDPOINT") or "").strip() or ""
+
+
+def _s3_addressing_style() -> str:
+    # MinIO commonly requires path-style. If endpoint is provided, default to path.
+    endpoint = _s3_endpoint_url()
+    force_path = _bool_env("AWS_S3_FORCE_PATH_STYLE", default=bool(endpoint))
+    return "path" if force_path else "virtual"
+
 def upload_file_to_s3(file_path, bucket_name, s3_key):
     """
     Upload a file to an S3 bucket silently.
     """
-    access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-    secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-    region = os.environ.get('AWS_REGION', 'eu-west-3')
-
-    if not access_key or not secret_key:
+    s3_client = get_s3_client()
+    if not s3_client:
         return False
-
-    s3_client = boto3.client(
-        's3',
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name=region
-    )
     try:
         # Extra arguments for public read if needed, but the user didn't specify.
         # Given the bucket name, it might be for a web app.
@@ -41,7 +50,6 @@ def upload_file_to_s3(file_path, bucket_name, s3_key):
         return False
 
 
-from botocore.config import Config
 import json
 import time as time_module
 
@@ -57,6 +65,8 @@ def get_s3_client():
     access_key = os.environ.get('AWS_ACCESS_KEY_ID')
     secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
     region = os.environ.get('AWS_REGION', 'eu-west-3')
+    endpoint_url = _s3_endpoint_url()
+    addressing_style = _s3_addressing_style()
 
     if not access_key or not secret_key:
         return None
@@ -66,7 +76,11 @@ def get_s3_client():
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
         region_name=region,
-        config=Config(signature_version='s3v4')
+        endpoint_url=endpoint_url or None,
+        config=Config(
+            signature_version='s3v4',
+            s3={'addressing_style': addressing_style},
+        )
     )
 
 def generate_presigned_url(bucket_name, object_key, expiration=3600):
@@ -104,7 +118,7 @@ def list_all_clips(bucket_name=None, limit=50, force_refresh=False):
             return cached[:limit] if limit else cached
     
     if not bucket_name:
-        bucket_name = os.environ.get('AWS_S3_BUCKET', 'my-clips-bucket')
+        bucket_name = os.environ.get('AWS_S3_BUCKET', 'openshorts')
 
     s3_client = get_s3_client()
     if not s3_client:
@@ -218,7 +232,12 @@ def upload_actor_to_s3(file_path, description=""):
             file_path, bucket_name, s3_key,
             ExtraArgs={'ContentType': 'image/png'},
         )
-        public_url = f"https://{bucket_name}.s3.{region}.amazonaws.com/{s3_key}"
+        # On MinIO/custom endpoints we can't assume AWS-style hostnames.
+        endpoint_url = _s3_endpoint_url().rstrip('/')
+        if endpoint_url:
+            public_url = f"{endpoint_url}/{bucket_name}/{s3_key}"
+        else:
+            public_url = f"https://{bucket_name}.s3.{region}.amazonaws.com/{s3_key}"
 
         # Save metadata JSON alongside the image
         if description:
@@ -276,7 +295,11 @@ def list_actor_gallery():
                 continue
             obj = data['image']
             key = obj['Key']
-            public_url = f"https://{bucket_name}.s3.{region}.amazonaws.com/{key}"
+            endpoint_url = _s3_endpoint_url().rstrip('/')
+            if endpoint_url:
+                public_url = f"{endpoint_url}/{bucket_name}/{key}"
+            else:
+                public_url = f"https://{bucket_name}.s3.{region}.amazonaws.com/{key}"
             entry = {
                 "url": public_url,
                 "key": key,
@@ -324,7 +347,8 @@ def upload_video_to_gallery(video_path, actor_image_path, metadata, video_id=Non
     if not video_id:
         video_id = str(uuid.uuid4())[:8]
 
-    base_url = f"https://{bucket_name}.s3.{region}.amazonaws.com"
+    endpoint_url = _s3_endpoint_url().rstrip('/')
+    base_url = f"{endpoint_url}/{bucket_name}" if endpoint_url else f"https://{bucket_name}.s3.{region}.amazonaws.com"
     results = {}
 
     try:
@@ -436,11 +460,24 @@ def upload_job_artifacts(directory, job_id):
     if not os.path.exists(directory):
         return
 
-    for filename in os.listdir(directory):
-        # Upload .mp4 clips and the metadata JSON
-        if (filename.endswith(".mp4") or filename.endswith(".json")) and not filename.startswith("temp_"):
-            file_path = os.path.join(directory, filename)
-            s3_key = f"{job_id}/{filename}"
+    allowed_exts = {
+        ".mp4", ".mkv", ".webm", ".mov", ".m4v",
+        ".json", ".srt",
+    }
+
+    for root, _dirs, files in os.walk(directory):
+        for filename in files:
+            if filename.startswith("temp_"):
+                continue
+            _, ext = os.path.splitext(filename)
+            if ext.lower() not in allowed_exts:
+                continue
+            file_path = os.path.join(root, filename)
+            try:
+                rel_path = os.path.relpath(file_path, directory).replace(os.sep, "/")
+            except Exception:
+                rel_path = filename
+            s3_key = f"{job_id}/{rel_path}"
             upload_file_to_s3(file_path, bucket_name, s3_key)
 
 

@@ -8,6 +8,7 @@ import glob
 import time
 import asyncio
 import re as _re
+import concurrent.futures
 from dotenv import load_dotenv
 from typing import Dict, Optional, List
 from contextlib import asynccontextmanager
@@ -16,7 +17,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
+from s3_uploader import (
+    upload_job_artifacts,
+    upload_file_to_s3,
+    list_all_clips,
+    upload_actor_to_s3,
+    list_actor_gallery,
+    upload_video_to_gallery,
+    list_video_gallery,
+)
 import notification_service
 
 load_dotenv()
@@ -43,6 +52,31 @@ thumbnail_sessions: Dict[str, Dict] = {}
 publish_jobs: Dict[str, Dict] = {}  # {publish_id: {status, result, error}}
 # Semester to limit concurrency to MAX_CONCURRENT_JOBS
 concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+
+# Main asyncio loop reference for thread-safe scheduling (e.g. Telegram bot thread)
+_MAIN_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _enqueue_job_threadsafe(job_id: str) -> None:
+    """Put a job_id onto job_queue from any thread, silently."""
+    try:
+        # If we're already on the event loop thread
+        loop = asyncio.get_running_loop()
+        loop.create_task(job_queue.put(job_id))
+        return
+    except RuntimeError:
+        # No running loop in this thread
+        pass
+
+    global _MAIN_LOOP
+    if _MAIN_LOOP is None:
+        return
+
+    try:
+        asyncio.run_coroutine_threadsafe(job_queue.put(job_id), _MAIN_LOOP)
+    except Exception:
+        # Silent by design
+        return
 
 def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     """
@@ -166,6 +200,8 @@ async def run_job_wrapper(job_id):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Start worker, cleanup
+    global _MAIN_LOOP
+    _MAIN_LOOP = asyncio.get_running_loop()
     worker_task = asyncio.create_task(process_queue())
     cleanup_task = asyncio.create_task(cleanup_jobs())
 
@@ -244,6 +280,24 @@ async def run_job(job_id, job_data):
     # Track which clip filenames we've already notified (avoid duplicates)
     _notified_clips: set = set()
 
+    # Track which local artifacts have been uploaded to S3/MinIO already
+    _uploaded_artifacts: set[str] = set()
+    _artifact_last_size: dict[str, int] = {}
+
+    # If this was a file-upload job, upload the original source file too
+    try:
+        if "-i" in cmd:
+            idx = cmd.index("-i")
+            input_path = cmd[idx + 1] if idx + 1 < len(cmd) else ""
+            if input_path and os.path.exists(input_path):
+                bucket_name = os.environ.get('AWS_S3_BUCKET', 'openshorts')
+                _ext = os.path.splitext(input_path)[1] or ".mp4"
+                s3_key = f"{job_id}/source{_ext}"
+                loop0 = asyncio.get_running_loop()
+                loop0.run_in_executor(None, upload_file_to_s3, input_path, bucket_name, s3_key)
+    except Exception:
+        pass
+
     def _notify_ready_clip(clip: dict, clip_index: int, clip_path: str):
         """Send notification for a single ready clip (runs in background thread)."""
         filename = os.path.basename(clip.get("video_url", clip_path))
@@ -277,6 +331,52 @@ async def run_job(job_id, job_data):
         start_wait = time.time()
         while process.poll() is None:
             await asyncio.sleep(2)
+
+            # Silent incremental S3/MinIO upload:
+            # upload mp4/json artifacts as soon as they are fully written.
+            try:
+                bucket_name = os.environ.get('AWS_S3_BUCKET', 'openshorts')
+                # Use the running loop for executor submissions
+                loop = asyncio.get_running_loop()
+
+                for filename in os.listdir(output_dir):
+                    if filename.startswith('temp_'):
+                        continue
+                    lower = filename.lower()
+                    if not (
+                        lower.endswith('.json')
+                        or lower.endswith('.srt')
+                        or lower.endswith('.mp4')
+                        or lower.endswith('.mkv')
+                        or lower.endswith('.webm')
+                        or lower.endswith('.mov')
+                        or lower.endswith('.m4v')
+                    ):
+                        continue
+                    local_path = os.path.join(output_dir, filename)
+                    if local_path in _uploaded_artifacts:
+                        continue
+                    if not os.path.exists(local_path):
+                        continue
+
+                    try:
+                        size = os.path.getsize(local_path)
+                    except Exception:
+                        continue
+                    if size <= 0:
+                        continue
+
+                    # Consider the file "stable" if its size is unchanged across checks.
+                    prev = _artifact_last_size.get(local_path)
+                    _artifact_last_size[local_path] = size
+                    if prev is None or prev != size:
+                        continue
+
+                    s3_key = f"{job_id}/{filename}"
+                    _uploaded_artifacts.add(local_path)
+                    loop.run_in_executor(None, upload_file_to_s3, local_path, bucket_name, s3_key)
+            except Exception:
+                pass
             
             # Check for partial results every 2 seconds
             # Look for metadata file
@@ -499,7 +599,7 @@ def _handle_notify_job(url: str, source: str = "notify") -> Optional[str]:
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(job_output_dir, exist_ok=True)
 
-    cmd = ["python", "-u", "main.py", "-u", url, "-o", job_output_dir]
+    cmd = ["python", "-u", "main.py", "-u", url, "-o", job_output_dir, "--keep-original"]
     env = os.environ.copy()
     for key in ["LLM_PROVIDER", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL",
                  "GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL"]:
@@ -530,7 +630,7 @@ def _handle_notify_job(url: str, source: str = "notify") -> Optional[str]:
     }
 
     notification_service.notify_job_submitted(job_id, url, source=source)
-    asyncio.create_task(job_queue.put(job_id))
+    _enqueue_job_threadsafe(job_id)
     print(f"Job {job_id} created for URL: {url}")
     return job_id
 
@@ -592,7 +692,7 @@ async def process_endpoint(
     env = _build_llm_env(llm)
 
     if url:
-        cmd.extend(["-u", url])
+        cmd.extend(["-u", url, "--keep-original"])
     else:
         # Save uploaded file with size limit check
         input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{file.filename}")

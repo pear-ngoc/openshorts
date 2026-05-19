@@ -109,6 +109,35 @@ class YtsaveService(YouTubeServiceBase):
         """Download video via ytsave 3-step flow."""
         import urllib.parse
 
+        def _post_with_retries(client: httpx.Client, data: str, *, attempts: int = 4) -> httpx.Response:
+            last_exc: Exception | None = None
+            for i in range(max(1, attempts)):
+                try:
+                    resp = client.post(
+                        "https://ytsave.to/proxy.php",
+                        headers=self._headers,
+                        cookies={"PHPSESSID": self.phpsessid},
+                        data=data,
+                    )
+                    resp.raise_for_status()
+                    return resp
+                except httpx.HTTPStatusError as e:
+                    last_exc = e
+                    status = e.response.status_code if e.response is not None else None
+                    if status in (502, 503, 504) and i < attempts - 1:
+                        time.sleep(min(2 ** i, 8))
+                        continue
+                    raise
+                except httpx.TransportError as e:
+                    last_exc = e
+                    if i < attempts - 1:
+                        time.sleep(min(2 ** i, 8))
+                        continue
+                    raise
+            if last_exc:
+                raise last_exc
+            raise RuntimeError("Ytsave request failed")
+
         video_id = self._extract_video_id(url)
         url_encoded = urllib.parse.quote(url, safe="")
 
@@ -116,13 +145,7 @@ class YtsaveService(YouTubeServiceBase):
 
         with httpx.Client(timeout=60.0, follow_redirects=True) as client:
             # Step 1: submit YouTube URL -> get media items
-            resp1 = client.post(
-                "https://ytsave.to/proxy.php",
-                headers=self._headers,
-                cookies={"PHPSESSID": self.phpsessid},
-                data=f"url={url_encoded}",
-            )
-            resp1.raise_for_status()
+            resp1 = _post_with_retries(client, f"url={url_encoded}")
             data1 = resp1.json()
 
             api_data = data1.get("api", {})
@@ -148,21 +171,34 @@ class YtsaveService(YouTubeServiceBase):
 
             # Step 2: request download URL
             media_url_encoded = urllib.parse.quote(media_url, safe="")
-            resp2 = client.post(
-                "https://ytsave.to/proxy.php",
-                headers=self._headers,
-                cookies={"PHPSESSID": self.phpsessid},
-                data=f"url={media_url_encoded}",
-            )
-            resp2.raise_for_status()
-            data2 = resp2.json()
+            max_wait_seconds = int(os.environ.get("YTSAVE_MAX_WAIT_SECONDS", "900"))
+            poll_seconds = float(os.environ.get("YTSAVE_POLL_SECONDS", "5"))
+            deadline = time.time() + max_wait_seconds
 
-            api2 = data2.get("api", {})
-            if api2.get("status") != "completed":
+            last_api2 = None
+            while True:
+                resp2 = _post_with_retries(client, f"url={media_url_encoded}")
+                data2 = resp2.json()
+                api2 = data2.get("api", {})
+                last_api2 = api2
+
+                status = str(api2.get("status") or "").strip().lower()
+                file_url = str(api2.get("fileUrl") or "").strip()
+                if status == "completed" and file_url and file_url.lower() != "waiting...":
+                    break
+
+                # Typical non-terminal states: queued / processing / waiting
+                if status in ("queued", "processing", "waiting", "running"):
+                    if time.time() >= deadline:
+                        raise RuntimeError(f"Ytsave step 2 timeout after {max_wait_seconds}s: {api2}")
+                    time.sleep(max(1.0, poll_seconds))
+                    continue
+
+                # Unknown / error states
                 raise RuntimeError(f"Ytsave step 2 error: {api2}")
 
-            file_url = api2["fileUrl"]
-            dl_size_mb = int(api2.get("fileSizeBytes", 0)) / (1024 * 1024)
+            file_url = last_api2["fileUrl"]
+            dl_size_mb = int(last_api2.get("fileSizeBytes", 0)) / (1024 * 1024)
             print(f"   Download ready: {dl_size_mb:.1f} MB")
 
             # Step 3: download

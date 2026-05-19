@@ -727,16 +727,21 @@ def process_video_to_vertical(input_video, final_output_video):
     Core logic to convert horizontal video to vertical using scene detection and Active Speaker Tracking (MediaPipe).
     """
     script_start_time = time.time()
-    
-    # Define temporary file paths based on the output name
-    base_name = os.path.splitext(final_output_video)[0]
-    temp_video_output = f"{base_name}_temp_video.mp4"
-    temp_audio_output = f"{base_name}_temp_audio.aac"
-    
+
+    # Define temporary file paths based on the output name.
+    # Use temp_ prefix so uploaders skip these intermediates.
+    out_dir = os.path.dirname(final_output_video) or "."
+    out_stem = os.path.splitext(os.path.basename(final_output_video))[0]
+    temp_video_output = os.path.join(out_dir, f"temp_{out_stem}.mp4")
+    temp_audio_output = os.path.join(out_dir, f"temp_{out_stem}.aac")
+
     # Clean up previous temp files if they exist
-    if os.path.exists(temp_video_output): os.remove(temp_video_output)
-    if os.path.exists(temp_audio_output): os.remove(temp_audio_output)
-    if os.path.exists(final_output_video): os.remove(final_output_video)
+    if os.path.exists(temp_video_output):
+        os.remove(temp_video_output)
+    if os.path.exists(temp_audio_output):
+        os.remove(temp_audio_output)
+    if os.path.exists(final_output_video):
+        os.remove(final_output_video)
 
     print(f"🎬 Processing clip: {input_video}")
     print("   Step 1: Detecting scenes...")
@@ -813,108 +818,107 @@ def process_video_to_vertical(input_video, final_output_video):
         temp_video_output
     ]
 
-    ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    ffmpeg_process = None
+    cap = None
+    try:
+        ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-    cap = cv2.VideoCapture(input_video)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    frame_number = 0
-    current_scene_index = 0
-    
-    # Pre-calculate scene boundaries
-    scene_boundaries = []
-    for s_start, s_end in scenes:
-        # SceneDetect FrameTimecode: get_frames() is deprecated
-        scene_boundaries.append((s_start.frame_num, s_end.frame_num))
+        cap = cv2.VideoCapture(input_video)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Global tracker for single-person shots
-    speaker_tracker = SpeakerTracker(cooldown_frames=30)
+        frame_number = 0
+        current_scene_index = 0
 
-    with tqdm(total=total_frames, desc="   Processing", file=sys.stdout) as pbar:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+        # Pre-calculate scene boundaries
+        scene_boundaries = []
+        for s_start, s_end in scenes:
+            # SceneDetect FrameTimecode: get_frames() is deprecated
+            scene_boundaries.append((s_start.frame_num, s_end.frame_num))
 
-            # Update Scene Index
-            if current_scene_index < len(scene_boundaries):
-                start_f, end_f = scene_boundaries[current_scene_index]
-                if frame_number >= end_f and current_scene_index < len(scene_boundaries) - 1:
-                    current_scene_index += 1
-            
-            # Determine Strategy for current frame based on scene
-            current_strategy = scene_strategies[current_scene_index] if current_scene_index < len(scene_strategies) else 'TRACK'
-            
-            # Apply Strategy
-            if current_strategy == 'GENERAL':
-                # "Plano General" -> Blur Background + Fit Width
-                output_frame = create_general_frame(frame, OUTPUT_WIDTH, OUTPUT_HEIGHT)
-                
-                # Debug log first GENERAL frame
-                if frame_number == 0:
-                    print(f"   📐 GENERAL frame: source={frame.shape[1]}x{frame.shape[0]} composite={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
-                
-                # Reset cameraman/tracker so they don't drift while inactive
-                cameraman.current_center_x = original_width / 2
-                cameraman.target_center_x = original_width / 2
-                
-            else:
-                # "Single Speaker" -> Track & Crop
-                
-                # Detect every 2nd frame for performance
-                if frame_number % 2 == 0:
-                    candidates = detect_face_candidates(frame)
-                    target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
-                    if target_box:
-                        cameraman.update_target(target_box)
-                    else:
-                        person_box = detect_person_yolo(frame)
-                        if person_box:
-                            cameraman.update_target(person_box)
+        # Global tracker for single-person shots
+        speaker_tracker = SpeakerTracker(cooldown_frames=30)
 
-                # Snap camera on scene change to avoid panning from previous scene position
-                is_scene_start = (frame_number == scene_boundaries[current_scene_index][0])
-                
-                x1, y1, x2, y2 = cameraman.get_crop_box(force_snap=is_scene_start)
-                
-                # Crop
-                if y2 > y1 and x2 > x1:
-                    cropped = frame[y1:y2, x1:x2]
-                    # output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT),
-                    #                           interpolation=cv2.INTER_LANCZOS4)
-                    output_frame = cv2.resize(
-                        cropped,
-                        (OUTPUT_WIDTH, OUTPUT_HEIGHT),
-                        interpolation=cv2.INTER_LANCZOS4
-                    )
-                    output_frame = unsharp_mask(output_frame)
+        with tqdm(total=total_frames, desc="   Processing", file=sys.stdout) as pbar:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                # Update Scene Index
+                if current_scene_index < len(scene_boundaries):
+                    start_f, end_f = scene_boundaries[current_scene_index]
+                    if frame_number >= end_f and current_scene_index < len(scene_boundaries) - 1:
+                        current_scene_index += 1
+
+                # Determine Strategy for current frame based on scene
+                current_strategy = scene_strategies[current_scene_index] if current_scene_index < len(scene_strategies) else 'TRACK'
+
+                # Apply Strategy
+                if current_strategy == 'GENERAL':
+                    # "Plano General" -> Blur Background + Fit Width
+                    output_frame = create_general_frame(frame, OUTPUT_WIDTH, OUTPUT_HEIGHT)
+
+                    # Debug log first GENERAL frame
                     if frame_number == 0:
-                        print(f"   📐 TRACK frame: source={frame.shape[1]}x{frame.shape[0]} crop={x2-x1}x{y2-y1} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
+                        print(f"   📐 GENERAL frame: source={frame.shape[1]}x{frame.shape[0]} composite={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
+
+                    # Reset cameraman/tracker so they don't drift while inactive
+                    cameraman.current_center_x = original_width / 2
+                    cameraman.target_center_x = original_width / 2
+
                 else:
-                    # output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT),
-                    #                          interpolation=cv2.INTER_LANCZOS4)
-                    output_frame = cv2.resize(
-                        frame,
-                        (OUTPUT_WIDTH, OUTPUT_HEIGHT),
-                        interpolation=cv2.INTER_LANCZOS4
-                    )
-                    output_frame = unsharp_mask(output_frame)
-                    if frame_number == 0:
-                        print(f"   📐 FALLBACK frame: source={frame.shape[1]}x{frame.shape[0]} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
+                    # "Single Speaker" -> Track & Crop
 
-            ffmpeg_process.stdin.write(output_frame.tobytes())
-            frame_number += 1
-            pbar.update(1)
-    
-    ffmpeg_process.stdin.close()
-    stderr_output = ffmpeg_process.stderr.read().decode()
-    ffmpeg_process.wait()
-    cap.release()
+                    # Detect every 2nd frame for performance
+                    if frame_number % 2 == 0:
+                        candidates = detect_face_candidates(frame)
+                        target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
+                        if target_box:
+                            cameraman.update_target(target_box)
+                        else:
+                            person_box = detect_person_yolo(frame)
+                            if person_box:
+                                cameraman.update_target(person_box)
 
-    if ffmpeg_process.returncode != 0:
-        print("\n   ❌ FFmpeg frame processing failed.")
-        print("   Stderr:", stderr_output)
-        return False
+                    # Snap camera on scene change to avoid panning from previous scene position
+                    is_scene_start = (frame_number == scene_boundaries[current_scene_index][0])
+
+                    x1, y1, x2, y2 = cameraman.get_crop_box(force_snap=is_scene_start)
+
+                    # Crop
+                    if y2 > y1 and x2 > x1:
+                        cropped = frame[y1:y2, x1:x2]
+                        output_frame = cv2.resize(
+                            cropped,
+                            (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+                            interpolation=cv2.INTER_LANCZOS4
+                        )
+                        output_frame = unsharp_mask(output_frame)
+                        if frame_number == 0:
+                            print(f"   📐 TRACK frame: source={frame.shape[1]}x{frame.shape[0]} crop={x2-x1}x{y2-y1} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
+                    else:
+                        output_frame = cv2.resize(
+                            frame,
+                            (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+                            interpolation=cv2.INTER_LANCZOS4
+                        )
+                        output_frame = unsharp_mask(output_frame)
+                        if frame_number == 0:
+                            print(f"   📐 FALLBACK frame: source={frame.shape[1]}x{frame.shape[0]} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
+
+                ffmpeg_process.stdin.write(output_frame.tobytes())
+                frame_number += 1
+                pbar.update(1)
+
+        ffmpeg_process.stdin.close()
+        stderr_output = ffmpeg_process.stderr.read().decode()
+        ffmpeg_process.wait()
+        cap.release()
+
+        if ffmpeg_process.returncode != 0:
+            print("\n   ❌ FFmpeg frame processing failed.")
+            print("   Stderr:", stderr_output)
+            return False
 
     # Verify output resolution
     out_w, out_h = get_video_resolution(temp_video_output)
@@ -958,11 +962,30 @@ def process_video_to_vertical(input_video, final_output_video):
     final_w, final_h = get_video_resolution(final_output_video)
     print(f"   ✅ Final output: {final_w}x{final_h}")
 
-    # Clean up temp files
-    if os.path.exists(temp_video_output): os.remove(temp_video_output)
-    if os.path.exists(temp_audio_output): os.remove(temp_audio_output)
-    
     return True
+
+    finally:
+        # Always attempt to clean up temp intermediates (even on failure/interrupt)
+        try:
+            if cap is not None:
+                cap.release()
+        except Exception:
+            pass
+        try:
+            if ffmpeg_process is not None and ffmpeg_process.stdin and not ffmpeg_process.stdin.closed:
+                ffmpeg_process.stdin.close()
+        except Exception:
+            pass
+        try:
+            if os.path.exists(temp_video_output):
+                os.remove(temp_video_output)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(temp_audio_output):
+                os.remove(temp_audio_output)
+        except Exception:
+            pass
 
 def extract_audio_for_transcription(video_path: str, output_audio_path: str) -> bool:
     """Extract audio from video for transcription (16kHz mono MP3)."""
@@ -1421,12 +1444,21 @@ if __name__ == '__main__':
             print(f"   ✅ Saved metadata to {metadata_file}")
     else:
         # 3. Transcribe
+        job_id_from_dir = os.path.basename(output_dir)
         if notification_service:
             notification_service.notify_step(os.path.basename(output_dir), "Transcription started", f"Processing: {input_video}")
         transcript = transcribe_video(input_video)
         if notification_service:
             notification_service.notify_step(os.path.basename(output_dir), "Transcription completed", f"{len(transcript.get('segments', []))} segments")
             notification_service.notify_transcription_result(os.path.basename(output_dir), transcript)
+
+        # Persist transcript as a standalone artifact (for S3/MinIO upload)
+        try:
+            transcript_file = os.path.join(output_dir, f"{job_id_from_dir}_transcript.json")
+            with open(transcript_file, 'w') as f:
+                json.dump(transcript, f, indent=2)
+        except Exception:
+            pass
 
         # Get duration
         cap = cv2.VideoCapture(input_video)
@@ -1439,6 +1471,15 @@ if __name__ == '__main__':
         if notification_service:
             notification_service.notify_step(os.path.basename(output_dir), "AI Analysis started", "Identifying viral moments...")
         clips_data = get_viral_clips(transcript, duration)
+
+        # Persist LLM response as a standalone artifact (for S3/MinIO upload)
+        try:
+            response_file = os.path.join(output_dir, f"{job_id_from_dir}_gemini_response.json")
+            payload = clips_data if isinstance(clips_data, dict) else {"shorts": [], "llm_failed": True}
+            with open(response_file, 'w') as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            pass
 
         if clips_data and clips_data.get('gemini_quota_exhausted'):
             print("⚠️  Gemini quota exhausted. Creating fallback clips from transcript...")
@@ -1460,15 +1501,49 @@ if __name__ == '__main__':
                 print(f"\n⏱️  Total execution time: {total_time:.2f}s")
                 sys.exit(1)
             print("❌ Failed to identify clips. Converting whole video as fallback.")
-            output_file = os.path.join(output_dir, f"{video_title}_vertical.mp4")
-            process_video_to_vertical(input_video, output_file)
+            # Use a stable filename so the job has a predictable artifact.
+            output_filename = f"{job_id_from_dir}_clip_1.mp4"
+            output_file = os.path.join(output_dir, output_filename)
+            success = process_video_to_vertical(input_video, output_file)
+
+            # Persist minimal metadata even in fallback mode
+            try:
+                metadata_basename = f"{job_id_from_dir}_metadata"
+                metadata_file = os.path.join(output_dir, f"{metadata_basename}.json")
+                metadata = {
+                    "shorts": [{
+                        "start": 0,
+                        "end": duration,
+                        "video_title_for_youtube_short": video_title or "Full Video",
+                        "video_description_for_tiktok": "Fallback: whole video converted to vertical.",
+                        "video_description_for_instagram": "Fallback: whole video converted to vertical.",
+                        "viral_hook_text": "",
+                        "filename": output_filename,
+                        "path": output_file,
+                        "video_url": f"/videos/{job_id_from_dir}/{output_filename}",
+                        "fallback_reason": "llm_failed"
+                    }],
+                    "transcript": transcript,
+                }
+                # Include the (possibly failed) LLM response shape for debugging
+                if isinstance(clips_data, dict):
+                    metadata.update({
+                        "llm": {
+                            "provider": get_llm_config()[0],
+                            "response": clips_data,
+                        }
+                    })
+                with open(metadata_file, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                print(f"   ✅ Saved metadata to {metadata_file}")
+            except Exception:
+                pass
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} viral clips!")
             if notification_service:
                 notification_service.notify_analysis_result(os.path.basename(output_dir), clips_data)
 
             # 5. Process each clip
-            job_id_from_dir = os.path.basename(output_dir)
             if notification_service:
                 notification_service.notify_step(job_id_from_dir, "Cutting clips", f"Processing {len(clips_data['shorts'])} clips...")
             for i, clip in enumerate(clips_data['shorts']):

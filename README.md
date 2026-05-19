@@ -188,6 +188,27 @@ cp .env.example .env
 # Edit .env with your AWS keys for S3 backup
 ```
 
+### Optional: ytsave.to YouTube proxy (when yt-dlp is blocked)
+
+If your server IP gets rate-limited / blocked by YouTube (common on VPS), you
+can enable the built-in `ytsave.to` proxy downloader.
+
+1. Open `https://ytsave.to/` in a browser
+2. Grab the `PHPSESSID` cookie (DevTools → Application/Storage → Cookies)
+3. Set these in your `.env`:
+
+```bash
+USE_YTSAVE_PROXY=true
+YTSAVE_PHPSESSID=your_cookie_value
+```
+
+4. Restart the stack: `docker compose down && docker compose up --build`
+
+Notes:
+- The cookie is a credential. Keep it private and rotate it if it leaks.
+- When enabled, OpenShorts will try ytsave first and automatically fall back to
+	yt-dlp on errors.
+
 ### 3. Launch
 ```bash
 docker compose up --build

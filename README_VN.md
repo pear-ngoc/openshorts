@@ -93,6 +93,11 @@ LLM_MODEL=gemini-2.5-flash
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_BASE_URL=
 GEMINI_MODEL=gemini-2.5-flash
+
+# --- YouTube Download Proxy (ytsave.to) ---
+# Bật khi yt-dlp bị chặn (IP ban / bot check).
+USE_YTSAVE_PROXY=false
+YTSAVE_PHPSESSID=
 ```
 
 ### Biến Môi Trường Chi Tiết
@@ -118,6 +123,25 @@ GEMINI_MODEL=gemini-2.5-flash
 | `GEMINI_API_KEY` | - | API key riêng cho Gemini |
 | `GEMINI_BASE_URL` | - | Base URL tuỳ chỉnh cho Gemini |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Model Gemini |
+
+#### YouTube Download Proxy (ytsave.to)
+
+Khi yt-dlp tải YouTube bị lỗi do IP bị chặn/rate-limit, bạn có thể bật proxy
+`ytsave.to` (đã tích hợp sẵn trong backend). Khi bật, hệ thống sẽ thử ytsave
+trước; nếu lỗi sẽ tự động fallback về yt-dlp.
+
+**Cách lấy cookie `PHPSESSID`:**
+1. Mở `https://ytsave.to/` (hoặc `https://ytsave.to/vi2/`) trên trình duyệt
+2. Mở DevTools → Application/Storage → Cookies → `ytsave.to`
+3. Copy giá trị `PHPSESSID`
+
+**Cấu hình trong `.env`:**
+```bash
+USE_YTSAVE_PROXY=true
+YTSAVE_PHPSESSID=gia_tri_cookie
+```
+
+Sau đó restart lại docker: `docker compose down && docker compose up --build`
 
 ## Thư Mục Dữ Liệu
 

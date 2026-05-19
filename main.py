@@ -121,17 +121,21 @@ def run_cmd(cmd, quiet=False, allow_fail=False):
 
 def cut_clip_30fps(input_video, output_video, start, duration):
     """
-    Cắt clip trong một pass duy nhất: cut + chuẩn hóa FPS + audio AAC.
-    -ss trước -i = fast input seeking (seek từ đầu input, nhanh hơn output seeking).
-    target FPS và encoder lấy từ CONFIG / _encoder_args().
+    Cắt clip: output seeking (-ss sau -i) cho frame-accurate + re-encode qua
+    libx264 baseline để fix partial-file corruption từ input seeking.
     """
     cmd = [
         "ffmpeg", "-y",
-        "-ss", str(start),
         "-i", str(input_video),
+        "-ss", str(start),
         "-t", str(duration),
         "-r", "30",
-        *_encoder_args(),
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "baseline",
+        "-level", "3.0",
         "-c:a", "aac",
         "-b:a", "128k",
         "-movflags", "+faststart",
@@ -948,6 +952,21 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
             print("   Stderr:", stderr_output)
             return False
 
+        if not os.path.exists(_temp_video_output):
+            print(f"\n   ❌ FFmpeg output file was not created: {_temp_video_output}")
+            print("   Stderr:", stderr_output)
+            return False
+
+        # Verify output frame count matches input
+        cap_check = cv2.VideoCapture(_temp_video_output)
+        output_frame_count = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap_check.release()
+        if output_frame_count == 0:
+            print(f"\n   ❌ FFmpeg output has 0 frames. Stderr: {stderr_output[-2000:]}")
+            return False
+        if output_frame_count < total_frames * 0.9:
+            print(f"   ⚠️  Output frames ({output_frame_count}) < 90% of input frames ({total_frames}) — input may be corrupted")
+
         # Verify output resolution
         out_w, out_h = get_video_resolution(_temp_video_output)
         print(f"   ✅ Intermediate video: {out_w}x{out_h}")
@@ -987,8 +1006,15 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
             return False
 
         # Verify final output
+        final_cap = cv2.VideoCapture(final_output_video)
+        final_frame_count = int(final_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        final_fps = final_cap.get(cv2.CAP_PROP_FPS)
+        final_cap.release()
         final_w, final_h = get_video_resolution(final_output_video)
-        print(f"   ✅ Final output: {final_w}x{final_h}")
+        final_duration = final_frame_count / final_fps if final_fps > 0 else 0
+        print(f"   ✅ Final output: {final_w}x{final_h}, {final_frame_count} frames, {final_duration:.1f}s @ {final_fps}fps")
+        if final_duration < 5:
+            print(f"   ❌ Final video is suspiciously short ({final_duration:.1f}s). The input clip may be corrupted.")
 
         return True
 
@@ -1591,10 +1617,9 @@ if __name__ == '__main__':
                 clip_temp_path = os.path.join(output_dir, f"temp_{clip_filename}")
                 clip_final_path = os.path.join(output_dir, clip_filename)
 
-                # Một pass: cut + chuẩn hóa FPS + encode audio
+                # Cut + re-encode: output seeking for accuracy, libx264 baseline to repair partial-file corruption
                 cut_start_time = time.time()
-                cut_encoder_label = "h264_nvenc/p4/CQ18/VBR" if HAS_NVENC else "libx264/veryslow/CRF18"
-                print(f"   ✂️  Cutting clip (FFmpeg, 30fps, {cut_encoder_label})...")
+                print(f"   ✂️  Cutting clip (FFmpeg, 30fps, libx264/fast/CRF18/baseline/repair)...")
                 cut_clip_30fps(input_video, clip_temp_path, start, end - start)
                 cut_end_time = time.time()
 

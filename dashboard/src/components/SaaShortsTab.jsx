@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Globe, Sparkles, Download, Copy, Check, ChevronRight, ChevronLeft, Loader2, AlertCircle, Volume2, User, Film, Terminal, ChevronDown, RefreshCw, Zap, Target, TrendingUp, MessageSquare, Eye, Share2, Calendar, Upload } from 'lucide-react';
+import { toast } from 'sonner';
 import { getApiUrl } from '../config';
 
 const STYLE_OPTIONS = [
@@ -254,11 +255,11 @@ export default function SaaShortsTab({ geminiApiKey, geminiBaseUrl, llmProvider,
 
   const handleGenerate = async () => {
     if (!falKey) {
-      alert('fal.ai API key required. Set it in Settings.');
+      toast.error('fal.ai API key required. Set it in Settings.');
       return;
     }
     if (!elevenLabsKey) {
-      alert('ElevenLabs API key required. Set it in Settings.');
+      toast.error('ElevenLabs API key required. Set it in Settings.');
       return;
     }
 

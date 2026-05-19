@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { Upload, Image, Loader2, Send, Check, Download, ArrowRight, ArrowLeft, Sparkles, Video, Type, X, Plus, MessageSquare, FileText, Youtube, AlertCircle, CheckCircle2, Settings } from 'lucide-react';
+import { toast } from 'sonner';
 import { getApiUrl } from '../config';
 
 const STEPS = ['Input', 'Titles', 'Generate', 'Description', 'Publish'];
@@ -165,7 +166,7 @@ export default function ThumbnailStudio({ geminiApiKey, geminiBaseUrl, llmProvid
 
   // --- Step 1: Analyze Video ---
   const handleAnalyze = async () => {
-    if (!geminiApiKey) return alert('Please set your Gemini API key in Settings first.');
+    if (!geminiApiKey) return toast.error('Please set your Gemini API key in Settings first.');
     setIsAnalyzing(true);
 
     try {
@@ -177,7 +178,7 @@ export default function ThumbnailStudio({ geminiApiKey, geminiBaseUrl, llmProvid
       } else if (videoFile) {
         formData.append('file', videoFile);
       } else {
-        return alert('Please upload a video file.');
+        return toast.error('Please upload a video file.');
       }
 
       const res = await fetch(getApiUrl('/api/thumbnail/analyze'), {
@@ -206,7 +207,7 @@ export default function ThumbnailStudio({ geminiApiKey, geminiBaseUrl, llmProvid
       }]);
       setStep(1);
     } catch (e) {
-      alert(`Analysis failed: ${e.message}`);
+      toast.error(`Analysis failed: ${e.message}`);
     } finally {
       setIsAnalyzing(false);
     }
@@ -286,9 +287,9 @@ export default function ThumbnailStudio({ geminiApiKey, geminiBaseUrl, llmProvid
 
   // --- Step 3: Generate Thumbnails ---
   const handleGenerate = async () => {
-    if (!geminiApiKey) return alert('Please set your Gemini API key in Settings first.');
+    if (!geminiApiKey) return toast.error('Please set your Gemini API key in Settings first.');
     const finalTitle = selectedTitle || manualTitle;
-    if (!finalTitle) return alert('Please select or enter a title first.');
+    if (!finalTitle) return toast.error('Please select or enter a title first.');
 
     setIsGenerating(true);
     setGeneratedThumbnails([]);
@@ -324,7 +325,7 @@ export default function ThumbnailStudio({ geminiApiKey, geminiBaseUrl, llmProvid
       }
       setGeneratedThumbnails(data.thumbnails);
     } catch (e) {
-      alert(`Generation failed: ${e.message}`);
+      toast.error(`Generation failed: ${e.message}`);
     } finally {
       setIsGenerating(false);
     }
@@ -350,10 +351,10 @@ export default function ThumbnailStudio({ geminiApiKey, geminiBaseUrl, llmProvid
 
   // --- Description Generation ---
   const handleGenerateDescription = async () => {
-    if (!geminiApiKey) return alert('Please set your Gemini API key in Settings first.');
+    if (!geminiApiKey) return toast.error('Please set your Gemini API key in Settings first.');
     const finalTitle = selectedTitle || manualTitle;
-    if (!finalTitle) return alert('Please select a title first.');
-    if (!sessionId) return alert('No session available.');
+    if (!finalTitle) return toast.error('Please select a title first.');
+    if (!sessionId) return toast.error('No session available.');
 
     setIsDescribing(true);
     try {
@@ -377,7 +378,7 @@ export default function ThumbnailStudio({ geminiApiKey, geminiBaseUrl, llmProvid
       const data = await res.json();
       setDescription(data.description || '');
     } catch (e) {
-      alert(`Description generation failed: ${e.message}`);
+      toast.error(`Description generation failed: ${e.message}`);
     } finally {
       setIsDescribing(false);
     }
@@ -385,11 +386,11 @@ export default function ThumbnailStudio({ geminiApiKey, geminiBaseUrl, llmProvid
 
   // --- Publish to YouTube ---
   const handlePublish = async () => {
-    if (!uploadPostKey || !uploadUserId) return alert('Please configure your Upload-Post API key and user in Settings first.');
+    if (!uploadPostKey || !uploadUserId) return toast.error('Please configure your Upload-Post API key and user in Settings first.');
     const finalTitle = selectedTitle || manualTitle;
-    if (!finalTitle) return alert('No title selected.');
-    if (!selectedThumbnail) return alert('Please select a thumbnail first.');
-    if (!description) return alert('Please generate or write a description first.');
+    if (!finalTitle) return toast.error('No title selected.');
+    if (!selectedThumbnail) return toast.error('Please select a thumbnail first.');
+    if (!description) return toast.error('Please generate or write a description first.');
 
     setIsPublishing(true);
     setPublishResult(null);

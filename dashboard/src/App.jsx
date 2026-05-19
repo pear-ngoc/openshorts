@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2 } from 'lucide-react';
+import { toast, Toaster } from 'sonner';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
@@ -346,10 +347,10 @@ function App() {
           setUploadUserId(data.profiles[0].username);
         }
       } else {
-        alert("No profiles found for this API Key.");
+        toast.error("No profiles found for this API Key.");
       }
     } catch (e) {
-      alert("Error fetching User Profiles. Please check key.");
+      toast.error("Error fetching User Profiles. Please check key.");
       console.error(e);
     }
   };
@@ -515,6 +516,7 @@ function App() {
 
   return (
     <div className="flex h-screen bg-background overflow-hidden selection:bg-primary/30">
+      <Toaster position="bottom-right" richColors closeButton />
       <Sidebar />
 
       <main className="flex-1 flex flex-col h-full overflow-hidden relative">
@@ -695,7 +697,7 @@ function App() {
                       onClick={() => {
                         if (elevenLabsKey) {
                           localStorage.setItem('elevenLabsKey_v1', encrypt(elevenLabsKey));
-                          alert('ElevenLabs API Key saved!');
+                          toast.success('ElevenLabs API Key saved!');
                         }
                       }}
                       className="btn-primary py-2 px-4 text-sm"
@@ -746,7 +748,7 @@ function App() {
                       onClick={() => {
                         if (falKey) {
                           localStorage.setItem('falKey_v1', encrypt(falKey));
-                          alert('fal.ai API Key saved!');
+                          toast.success('fal.ai API Key saved!');
                         }
                       }}
                       className="btn-primary py-2 px-4 text-sm"

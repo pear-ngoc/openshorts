@@ -920,49 +920,49 @@ def process_video_to_vertical(input_video, final_output_video):
             print("   Stderr:", stderr_output)
             return False
 
-    # Verify output resolution
-    out_w, out_h = get_video_resolution(temp_video_output)
-    print(f"   ✅ Intermediate video: {out_w}x{out_h}")
-    if out_w != OUTPUT_WIDTH or out_h != OUTPUT_HEIGHT:
-        print(f"   ⚠️  Output resolution mismatch! Expected {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}, got {out_w}x{out_h}")
+        # Verify output resolution
+        out_w, out_h = get_video_resolution(temp_video_output)
+        print(f"   ✅ Intermediate video: {out_w}x{out_h}")
+        if out_w != OUTPUT_WIDTH or out_h != OUTPUT_HEIGHT:
+            print(f"   ⚠️  Output resolution mismatch! Expected {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}, got {out_w}x{out_h}")
 
-    print("\n   🔊 Step 5: Extracting audio...")
-    audio_extract_command = [
-        'ffmpeg', '-y', '-i', input_video, '-vn',
-        '-acodec', 'aac', '-b:a', '192k',
-        temp_audio_output
-    ]
-    try:
-        subprocess.run(audio_extract_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError:
-        pass
-
-    if os.path.exists(temp_audio_output):
-        merge_command = [
-            'ffmpeg', '-y', '-i', temp_video_output, '-i', temp_audio_output,
-            '-c:v', 'copy',
-            '-c:a', 'aac', '-b:a', '192k',
-            '-movflags', '+faststart',
-            '-shortest', final_output_video
+        print("\n   🔊 Step 5: Extracting audio...")
+        audio_extract_command = [
+            'ffmpeg', '-y', '-i', input_video, '-vn',
+            '-acodec', 'aac', '-b:a', '192k',
+            temp_audio_output
         ]
-    else:
-         merge_command = [
-            'ffmpeg', '-y', '-i', temp_video_output,
-            '-c:v', 'copy',
-            '-movflags', '+faststart',
-            final_output_video
-         ]
-        
-    try:
-        subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError:
-        return False
+        try:
+            subprocess.run(audio_extract_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError:
+            pass
 
-    # Verify final output
-    final_w, final_h = get_video_resolution(final_output_video)
-    print(f"   ✅ Final output: {final_w}x{final_h}")
+        if os.path.exists(temp_audio_output):
+            merge_command = [
+                'ffmpeg', '-y', '-i', temp_video_output, '-i', temp_audio_output,
+                '-c:v', 'copy',
+                '-c:a', 'aac', '-b:a', '192k',
+                '-movflags', '+faststart',
+                '-shortest', final_output_video
+            ]
+        else:
+            merge_command = [
+                'ffmpeg', '-y', '-i', temp_video_output,
+                '-c:v', 'copy',
+                '-movflags', '+faststart',
+                final_output_video
+            ]
 
-    return True
+        try:
+            subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError:
+            return False
+
+        # Verify final output
+        final_w, final_h = get_video_resolution(final_output_video)
+        print(f"   ✅ Final output: {final_w}x{final_h}")
+
+        return True
 
     finally:
         # Always attempt to clean up temp intermediates (even on failure/interrupt)

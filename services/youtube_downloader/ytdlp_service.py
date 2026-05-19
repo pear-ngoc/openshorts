@@ -81,12 +81,23 @@ class YtdlpService(YouTubeServiceBase):
     def download(self, url: str, output_dir: str) -> YouTubeDownloadResult:
         """Download the video using yt-dlp."""
         video_id = self._extract_video_id(url)
-        sanitized_title = f"yt_{video_id}"
+        fallback_basename = f"yt_{video_id}"
 
+        # Extract info first so we can produce a stable, human-readable filename.
+        base_opts = {**self._common_opts}
+        with yt_dlp.YoutubeDL(base_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        video_info = self._to_video_info(info)
+
+        sanitized_title = sanitize_filename(info.get("title", fallback_basename))
+
+        # Download to a title-based filename so callers can reliably open the returned path.
         output_template = os.path.join(output_dir, f"{sanitized_title}.%(ext)s")
-        expected_file = os.path.join(output_dir, f"{sanitized_title}.mp4")
-        if os.path.exists(expected_file):
-            os.remove(expected_file)
+        expected_mp4 = os.path.join(output_dir, f"{sanitized_title}.mp4")
+        fallback_mp4 = os.path.join(output_dir, f"{fallback_basename}.mp4")
+        for path in (expected_mp4, fallback_mp4):
+            if os.path.exists(path):
+                os.remove(path)
 
         opts = {
             **self._common_opts,
@@ -102,17 +113,20 @@ class YtdlpService(YouTubeServiceBase):
         }
 
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            video_info = self._to_video_info(info)
-            sanitized_title = sanitize_filename(info.get("title", f"yt_{video_id}"))
             ydl.download([url])
 
-        downloaded_file = os.path.join(output_dir, f"{sanitized_title}.mp4")
+        # Resolve the actual downloaded file.
+        downloaded_file = expected_mp4
         if not os.path.exists(downloaded_file):
+            # Some extractors may append extra suffixes; find the closest match.
             for f in os.listdir(output_dir):
                 if f.startswith(sanitized_title) and f.endswith(".mp4"):
                     downloaded_file = os.path.join(output_dir, f)
                     break
+
+        # Last-resort fallback: yt_<id>.mp4 (historical behavior)
+        if not os.path.exists(downloaded_file) and os.path.exists(fallback_mp4):
+            downloaded_file = fallback_mp4
 
         return YouTubeDownloadResult(
             file_path=downloaded_file,

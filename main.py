@@ -795,8 +795,12 @@ def process_video_to_vertical(input_video, final_output_video):
     #     '-movflags', '+faststart',
     #     '-an', temp_video_output
     # ]
+    # IMPORTANT: ffmpeg prints periodic progress/stats to stderr by default.
+    # We pipe raw frames to ffmpeg via stdin; if stderr is too chatty and not
+    # drained concurrently, the OS pipe buffer can fill and block the encode.
+    # Keep stderr minimal to avoid apparent "stuck at 0%" hangs.
     command = [
-        'ffmpeg', '-y',
+        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostats', '-y',
         '-f', 'rawvideo',
         '-vcodec', 'rawvideo',
         '-s', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}',
@@ -820,7 +824,8 @@ def process_video_to_vertical(input_video, final_output_video):
     # Pre-calculate scene boundaries
     scene_boundaries = []
     for s_start, s_end in scenes:
-        scene_boundaries.append((s_start.get_frames(), s_end.get_frames()))
+        # SceneDetect FrameTimecode: get_frames() is deprecated
+        scene_boundaries.append((s_start.frame_num, s_end.frame_num))
 
     # Global tracker for single-person shots
     speaker_tracker = SpeakerTracker(cooldown_frames=30)
@@ -1480,7 +1485,12 @@ if __name__ == '__main__':
                 clip_final_path = os.path.join(output_dir, clip_filename)
 
                 # Một pass: cut + chuẩn hóa FPS + encode audio
+                cut_start_time = time.time()
+                cut_encoder_label = "h264_nvenc/p4/CQ18/VBR" if HAS_NVENC else "libx264/veryslow/CRF18"
+                print(f"   ✂️  Cutting clip (FFmpeg, 30fps, {cut_encoder_label})...")
                 cut_clip_30fps(input_video, clip_temp_path, start, end - start)
+                cut_end_time = time.time()
+                print(f"   ✅ Cut done in {cut_end_time - cut_start_time:.2f}s: {clip_temp_path}")
 
                 # Process vertical
                 success = process_video_to_vertical(clip_temp_path, clip_final_path)

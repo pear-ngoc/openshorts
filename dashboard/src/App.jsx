@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2 } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import KeyInput from './components/KeyInput';
@@ -167,6 +167,16 @@ function App() {
   const [results, setResults] = useState(null);
   const [logs, setLogs] = useState([]); // [{text: string, time: Date}, ...]
   const [logsVisible, setLogsVisible] = useState(true);
+  const logsEndRef = useRef(null);
+  const logsContainerRef = useRef(null);
+  const userScrolledUpRef = useRef(false);
+
+  // Auto-scroll logs: scroll down only if user is at bottom (or hasn't manually scrolled up)
+  useEffect(() => {
+    if (!userScrolledUpRef.current && logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs]);
   const [processingMedia, setProcessingMedia] = useState(null);
   const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, settings
 
@@ -979,7 +989,16 @@ function App() {
                     </button>
                   </div>
                   {logsVisible && (
-                    <div className="flex-1 p-4 overflow-y-auto font-mono text-xs space-y-1.5 custom-scrollbar text-zinc-400">
+                    <div
+                      ref={logsContainerRef}
+                      onScroll={() => {
+                        const el = logsContainerRef.current;
+                        if (!el) return;
+                        const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+                        userScrolledUpRef.current = !isAtBottom;
+                      }}
+                      className="flex-1 p-4 overflow-y-auto font-mono text-xs space-y-1.5 custom-scrollbar text-zinc-400"
+                    >
                       {logs.map((log, i) => (
                         <div key={i} className={`flex gap-2 ${log.text.toLowerCase().includes('error') ? 'text-red-400' : 'text-zinc-400'}`}>
                           <span className="text-zinc-700 shrink-0">{log.time.toLocaleTimeString()}</span>
@@ -989,6 +1008,7 @@ function App() {
                       {status === 'processing' && (
                         <div className="animate-pulse text-primary/70">_</div>
                       )}
+                      <div ref={logsEndRef} />
                     </div>
                   )}
                 </div>

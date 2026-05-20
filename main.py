@@ -33,10 +33,11 @@ load_dotenv()
 def _detect_nvenc():
     """
     Check two things before enabling hardware encoding:
-    1. FFmpeg was compiled with h264_nvenc support.
-    2. The CUDA driver (libcuda.so.1) is actually loadable at runtime.
-       Even when FFmpeg includes the encoder, it fails at execution if
-       no GPU/driver is present (common in containers without a GPU).
+    1. FFmpeg was compiled with h264_nvenc support (checked via `ffmpeg -encoders`).
+    2. CUDA runtime is available (via torch.cuda.is_available()).
+
+    Unlike ldconfig -p, torch.cuda.is_available() reliably detects the GPU
+    passed through to the container via NVIDIA Container Toolkit.
     """
     try:
         encoders = subprocess.check_output(
@@ -50,24 +51,21 @@ def _detect_nvenc():
     if not has_encoder:
         return False
 
-    # Confirm libcuda.so.1 is loadable — avoids "Cannot load libcuda.so.1" at encode time.
-    try:
-        subprocess.check_output(
-            ["ldconfig", "-p"],
-            stderr=subprocess.DEVNULL,
-        ).decode(errors="ignore")
-        cuda_libs = subprocess.check_output(
-            ["ldconfig", "-p"],
-            stderr=subprocess.DEVNULL,
-        ).decode(errors="ignore")
-        has_cuda = "libcuda.so" in cuda_libs
-    except Exception:
-        has_cuda = False
+    has_cuda = torch.cuda.is_available()
+    if has_cuda:
+        print(f"   GPU detected: {torch.cuda.get_device_name(0)}")
+        _ = torch.zeros(1).cuda()
 
     return has_cuda
 
 HAS_NVENC = _detect_nvenc()
 print("NVENC available:", HAS_NVENC)
+
+# ─── CUDA availability flag for Faster-Whisper ───────────────────────────────
+HAS_CUDA = torch.cuda.is_available()
+CUDA_DEVICE = "cuda" if HAS_CUDA else "cpu"
+CUDA_COMPUTE = "float16" if HAS_CUDA else "int8"
+print(f"CUDA for inference: {CUDA_DEVICE} ({CUDA_COMPUTE})" if HAS_CUDA else "Running on CPU")
 
 # Chế độ test: chỉ render clip đầu tiên rồi dừng (set IS_TEST_MODE=true trong .env)
 IS_TEST_MODE = os.getenv("IS_TEST_MODE", "false").lower() in ("1", "true", "yes")
@@ -121,26 +119,44 @@ def run_cmd(cmd, quiet=False, allow_fail=False):
 
 def cut_clip_30fps(input_video, output_video, start, duration):
     """
-    Cắt clip: output seeking (-ss sau -i) cho frame-accurate + re-encode qua
-    libx264 baseline để fix partial-file corruption từ input seeking.
+    Cắt clip: output seeking (-ss sau -i) cho frame-accurate + re-encode.
+    Dùng NVENC hardware encoder khi GPU khả dụng, fallback về libx264.
     """
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(input_video),
-        "-ss", str(start),
-        "-t", str(duration),
-        "-r", "30",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-profile:v", "baseline",
-        "-level", "3.0",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        str(output_video),
-    ]
+    if HAS_NVENC:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_video),
+            "-ss", str(start),
+            "-t", str(duration),
+            "-r", "30",
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-cq", "18",
+            "-rc:v", "vbr",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output_video),
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_video),
+            "-ss", str(start),
+            "-t", str(duration),
+            "-r", "30",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "baseline",
+            "-level", "3.0",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output_video),
+        ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
@@ -1246,11 +1262,13 @@ def _transcribe_groq_chunk(audio_path: str, chunk_offset: float, chunk_index: in
 
 
 def transcribe_with_local_whisper(audio_path: str) -> list[dict]:
-    """Transcribe audio using Faster-Whisper (local CPU)."""
+    """Transcribe audio using Faster-Whisper (CUDA-accelerated if GPU available)."""
     from faster_whisper import WhisperModel
 
-    print("🎙️  Transcribing with Faster-Whisper (CPU Optimized)...")
-    model = WhisperModel("base", device="cpu", compute_type="int8")
+    device = CUDA_DEVICE
+    compute = CUDA_COMPUTE
+    print(f"🎙️  Transcribing with Faster-Whisper ({device.upper()} / {compute})...")
+    model = WhisperModel("base", device=device, compute_type=compute)
     segments, info = model.transcribe(audio_path, word_timestamps=True)
 
     print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")

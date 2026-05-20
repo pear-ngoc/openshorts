@@ -5,8 +5,26 @@ import subprocess
 import time
 import base64
 import cv2
+import torch
 from typing import Optional, Union
 from openai import OpenAI as _OpenAI
+
+
+def _detect_nvenc():
+    """Detect NVENC hardware encoder availability."""
+    try:
+        encoders = subprocess.check_output(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            stderr=subprocess.STDOUT,
+        ).decode(errors="ignore")
+        has_encoder = "h264_nvenc" in encoders
+    except Exception:
+        has_encoder = False
+    return has_encoder and torch.cuda.is_available()
+
+
+HAS_NVENC = _detect_nvenc()
+print("editor.py — NVENC available:", HAS_NVENC)
 
 
 def _normalize_openai_base_url(base_url: str) -> str:
@@ -414,17 +432,33 @@ Output format:
 
         print(f"🎬 Executing AI Filter: {filter_string}")
 
-        cmd = [
-            'ffmpeg', '-y',
-            '-i', input_path,
-            '-vf', filter_string,
-            '-c:v', 'libx264',
-            '-preset', 'slow', '-crf', '14',
-            '-pix_fmt', 'yuv420p',
-            '-movflags', '+faststart',
-            '-c:a', 'copy',
-            output_path
-        ]
+        if HAS_NVENC:
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', input_path,
+                '-vf', filter_string,
+                '-c:v', 'h264_nvenc',
+                '-preset', 'p4',
+                '-cq', '18',
+                '-rc:v', 'vbr',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
+                '-c:a', 'copy',
+                output_path
+            ]
+        else:
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', input_path,
+                '-vf', filter_string,
+                '-c:v', 'libx264',
+                '-preset', 'slow',
+                '-crf', '14',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
+                '-c:a', 'copy',
+                output_path
+            ]
 
         env = os.environ.copy()
         env["LANG"] = "C.UTF-8"

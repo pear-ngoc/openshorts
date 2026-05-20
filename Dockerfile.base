@@ -1,4 +1,10 @@
-FROM python:3.11-slim
+# ============================================================
+# NVIDIA CUDA Base Image — GPU-Accelerated Video Processing
+# Compatible with NVIDIA GeForce RTX 3060 via WSL 2
+# ============================================================
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
@@ -6,16 +12,23 @@ WORKDIR /app
 # SYSTEM DEPENDENCIES
 # =========================
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
     ffmpeg \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender1 \
-    nodejs \
     fontconfig \
     build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    git \
+    curl \
+    wget \
+    libusb-1.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python
 
 # =========================
 # PYTHON VENV
@@ -26,6 +39,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PIP_NO_CACHE_DIR=1
+
+# CUDA environment variables (required for torch + ffmpeg hardware encoding)
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+ENV CUDA_HOME=/usr/local/cuda
 
 # =========================
 # USER
@@ -49,8 +67,7 @@ RUN mkdir -p \
 
 # =========================
 # OWNERSHIP
-# Chown BEFORE pip install
-# Avoid massive recursive chown later
+# Chown BEFORE pip install to avoid massive recursive chown later
 # =========================
 RUN chown -R appuser:appuser \
     /app \
@@ -75,11 +92,14 @@ USER appuser
 RUN pip install --upgrade pip setuptools wheel
 
 # =========================
-# TORCH CPU ONLY
+# TORCH WITH CUDA 12.1 SUPPORT
 # =========================
+# Install CUDA-enabled PyTorch from the official NVIDIA/conda channel via pip.
+# Using cu121 wheel index for maximum RTX 3060 compatibility on CUDA 12.x driver.
 RUN pip install \
-    torch torchvision \
-    --index-url https://download.pytorch.org/whl/cpu
+    torch==2.3.1 \
+    torchvision==0.18.1 \
+    --index-url https://download.pytorch.org/whl/cu121
 
 # =========================
 # AI / VIDEO DEPENDENCIES
@@ -107,6 +127,13 @@ RUN pip install \
     requests
 
 # =========================
-# PRELOAD YOLO
+# PRELOAD YOLO + WARM UP CUDA
 # =========================
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+RUN python3 -c "\
+    from ultralytics import YOLO; \
+    YOLO('yolov8n.pt'); \
+    import torch; \
+    print(f'CUDA available: {torch.cuda.is_available()}'); \
+    if torch.cuda.is_available(): \
+        print(f'CUDA device: {torch.cuda.get_device_name(0)}'); \
+        _ = torch.zeros(1).cuda()  # warm-up"

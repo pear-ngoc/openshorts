@@ -1,7 +1,9 @@
 scenedetect==0.7
 ultralytics==8.4.46
-torch==2.11.0
-torchvision==0.26.0
+# PyTorch CUDA-enabled (for RTX 3060 / CUDA 12.x)
+# Install with: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# This file intentionally omits torch/torchvision to enforce explicit index-url usage.
+# If you see torch import errors, run the install command above manually.
 tqdm==4.67.3
 yt-dlp
 faster-whisper==1.2.1

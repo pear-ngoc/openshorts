@@ -20,6 +20,9 @@ services:
       - MPLCONFIGDIR=/tmp/matplotlib
       - XDG_CACHE_HOME=/tmp/cache
       - ULTRALYTICS_CONFIG_DIR=/tmp/Ultralytics
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - CUDA_HOME=/usr/local/cuda
       - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-local}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - GROQ_TRANSCRIPTION_MODEL=${GROQ_TRANSCRIPTION_MODEL:-whisper-large-v3-turbo}
@@ -37,6 +40,13 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   frontend:
     build:

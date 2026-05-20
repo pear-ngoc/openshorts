@@ -126,10 +126,8 @@ def cut_clip_30fps(input_video, output_video, start, duration):
     if HAS_NVENC:
         cmd = [
             "ffmpeg", "-y",
-            "-hwaccel", "cuda",
-            "-hwaccel_output_format", "cuda",
-            "-i", str(input_video),
             "-ss", str(start),
+            "-i", str(input_video),
             "-t", str(duration),
             "-r", "30",
             "-c:v", "h264_nvenc",

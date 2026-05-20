@@ -120,16 +120,19 @@ def run_cmd(cmd, quiet=False, allow_fail=False):
 
 def cut_clip_30fps(input_video, output_video, start, duration):
     """
-    Cắt clip: output seeking (-ss sau -i) cho frame-accurate + re-encode.
-    Dùng NVENC hardware encoder khi GPU khả dụng, fallback về libx264.
+    Cắt clip: CUDA hwaccel decode + NVENC GPU encode.
+    Output-side seeking (-ss before -i) cho tốc độ.
     """
     if HAS_NVENC:
         cmd = [
             "ffmpeg", "-y",
-            "-ss", str(start),
+            "-hwaccel", "cuda",
+            "-hwaccel_output_format", "cuda",
             "-i", str(input_video),
+            "-ss", str(start),
             "-t", str(duration),
             "-r", "30",
+            "-vf", "scale_cuda=1920:1080:force_original_aspect_ratio=decrease,hwdownload,format=nv12",
             "-c:v", "h264_nvenc",
             "-preset", "p4",
             "-cq", "18",
@@ -671,7 +674,7 @@ def create_general_frame(frame, output_width, output_height):
     bg_scale = output_height / orig_h
     bg_w = int(orig_w * bg_scale)
     bg_resized = cv2.resize(frame, (bg_w, output_height),
-                            interpolation=cv2.INTER_LANCZOS4)
+                            interpolation=cv2.INTER_LINEAR)
     
     # Crop center of background
     start_x = (bg_w - output_width) // 2
@@ -679,7 +682,7 @@ def create_general_frame(frame, output_width, output_height):
     background = bg_resized[:, start_x:start_x+output_width]
     if background.shape[1] != output_width:
         background = cv2.resize(background, (output_width, output_height),
-                                interpolation=cv2.INTER_LANCZOS4)
+                                interpolation=cv2.INTER_LINEAR)
         
     # Blur background
     background = cv2.GaussianBlur(background, (51, 51), 0)
@@ -688,7 +691,7 @@ def create_general_frame(frame, output_width, output_height):
     scale = output_width / orig_w
     fg_h = int(orig_h * scale)
     foreground = cv2.resize(frame, (output_width, fg_h),
-                            interpolation=cv2.INTER_LANCZOS4)
+                            interpolation=cv2.INTER_LINEAR)
     # 3. Overlay
     y_offset = (output_height - fg_h) // 2
     
@@ -987,7 +990,7 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
                         output_frame = cv2.resize(
                             cropped,
                             (OUTPUT_WIDTH, OUTPUT_HEIGHT),
-                            interpolation=cv2.INTER_LANCZOS4
+                            interpolation=cv2.INTER_LINEAR
                         )
                         if frame_number == 0:
                             print(f"   📐 TRACK frame: source={frame.shape[1]}x{frame.shape[0]} crop={x2-x1}x{y2-y1} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
@@ -995,7 +998,7 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
                         output_frame = cv2.resize(
                             frame,
                             (OUTPUT_WIDTH, OUTPUT_HEIGHT),
-                            interpolation=cv2.INTER_LANCZOS4
+                            interpolation=cv2.INTER_LINEAR
                         )
                         if frame_number == 0:
                             print(f"   📐 FALLBACK frame: source={frame.shape[1]}x{frame.shape[0]} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")

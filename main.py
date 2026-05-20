@@ -80,6 +80,7 @@ def _encoder_args():
     """
     if HAS_NVENC:
         return [
+            "-vf", "unsharp=5:5:1.0:5:5:0.0",
             "-c:v", "h264_nvenc",
             "-preset", "p4",
             "-cq", "18",
@@ -125,6 +126,8 @@ def cut_clip_30fps(input_video, output_video, start, duration):
     if HAS_NVENC:
         cmd = [
             "ffmpeg", "-y",
+            "-hwaccel", "cuda",
+            "-hwaccel_output_format", "cuda",
             "-i", str(input_video),
             "-ss", str(start),
             "-t", str(duration),
@@ -688,7 +691,6 @@ def create_general_frame(frame, output_width, output_height):
     fg_h = int(orig_h * scale)
     foreground = cv2.resize(frame, (output_width, fg_h),
                             interpolation=cv2.INTER_LANCZOS4)
-    foreground = unsharp_mask(foreground)
     # 3. Overlay
     y_offset = (output_height - fg_h) // 2
     
@@ -696,16 +698,6 @@ def create_general_frame(frame, output_width, output_height):
     final_frame = background.copy()
     final_frame[y_offset:y_offset+fg_h, :] = foreground
     return final_frame
-
-def unsharp_mask(frame, amount=1.5, threshold=0):
-    """
-    Unsharp mask mạnh hơn Laplacian kernel cũ.
-    Bù độ mờ từ downscale/crop để giữ nét chi tiết.
-    amount=1.5–2.0 là mạnh, threshold=0 áp dụng cho mọi edge difference.
-    """
-    blurred = cv2.GaussianBlur(frame, (0, 0), 3)
-    lowcontrast = cv2.addWeighted(frame, 1.0, blurred, -1.0, 0)
-    return cv2.addWeighted(frame, 1.0, lowcontrast, amount, 0)
 
 def analyze_scenes_strategy(video_path, scenes):
     """
@@ -719,38 +711,18 @@ def analyze_scenes_strategy(video_path, scenes):
         return ['TRACK'] * len(scenes)
         
     for start, end in tqdm(scenes, desc="   Analyzing Scenes"):
-        # Sample 3 frames (start, middle, end)
-        frames_to_check = [
-            start.get_frames() + 5,
-            int((start.get_frames() + end.get_frames()) / 2),
-            end.get_frames() - 5
-        ]
+        # Check single frame at the middle of the scene
+        mid_frame = int((start.frame_num + end.frame_num) / 2)
         
-        face_counts = []
-        for f_idx in frames_to_check:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-            ret, frame = cap.read()
-            if not ret: continue
-            
-            # Detect faces
+        cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame)
+        ret, frame = cap.read()
+        
+        face_count = 0
+        if ret:
             candidates = detect_face_candidates(frame)
-            face_counts.append(len(candidates))
-            
-        # Decision Logic
-        if not face_counts:
-            avg_faces = 0
-        else:
-            avg_faces = sum(face_counts) / len(face_counts)
-            
-        # Strategy:
-        # 0 faces -> GENERAL (Landscape/B-roll)
-        # 1 face -> TRACK
-        # > 1.2 faces -> GENERAL (Group)
+            face_count = len(candidates)
         
-        if avg_faces > 2.5:
-            strategies.append('GENERAL')
-        else:
-            strategies.append('TRACK')
+        strategies.append('GENERAL' if face_count > 2 else 'TRACK')
             
     cap.release()
     return strategies
@@ -1019,7 +991,6 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
                             (OUTPUT_WIDTH, OUTPUT_HEIGHT),
                             interpolation=cv2.INTER_LANCZOS4
                         )
-                        output_frame = unsharp_mask(output_frame)
                         if frame_number == 0:
                             print(f"   📐 TRACK frame: source={frame.shape[1]}x{frame.shape[0]} crop={x2-x1}x{y2-y1} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
                     else:
@@ -1028,7 +999,6 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
                             (OUTPUT_WIDTH, OUTPUT_HEIGHT),
                             interpolation=cv2.INTER_LANCZOS4
                         )
-                        output_frame = unsharp_mask(output_frame)
                         if frame_number == 0:
                             print(f"   📐 FALLBACK frame: source={frame.shape[1]}x{frame.shape[0]} output={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
 

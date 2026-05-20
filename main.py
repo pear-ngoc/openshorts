@@ -797,11 +797,23 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
     script_start_time = time.time()
 
     # Define temporary file paths based on the output name.
-    # Use temp_ prefix so uploaders skip these intermediates.
+    # IMPORTANT: these intermediates must NEVER collide with `input_video`.
+    # Otherwise we would overwrite the input while reading it (producing ~1s outputs).
     out_dir = os.path.dirname(final_output_video) or "."
     out_stem = os.path.splitext(os.path.basename(final_output_video))[0]
-    _temp_video_output = temp_video_output_path or os.path.join(out_dir, f"temp_{out_stem}.mp4")
-    temp_audio_output = os.path.join(out_dir, f"temp_{out_stem}.aac")
+    _temp_video_output = temp_video_output_path or os.path.join(out_dir, f"temp_vertical_{out_stem}.mp4")
+    temp_audio_output = os.path.join(out_dir, f"temp_audio_{out_stem}.aac")
+
+    # Safety guard: never read and write the same file.
+    try:
+        if os.path.abspath(str(_temp_video_output)) == os.path.abspath(str(input_video)):
+            raise RuntimeError(
+                f"Refusing to overwrite input while processing. "
+                f"input_video == temp_output == {input_video}"
+            )
+    except Exception:
+        # If path normalization fails for any reason, continue; downstream I/O checks will catch issues.
+        pass
 
     # Clean up previous temp files if they exist (don't delete the input!)
     if _temp_video_output != input_video and os.path.exists(_temp_video_output):
@@ -817,19 +829,40 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
     file_size = os.path.getsize(input_video)
     print(f"   File exists: {file_size / (1024*1024):.1f} MB")
     print("   Step 1: Detecting scenes...")
+    scenes = None
+    fps = None
     try:
         scenes, fps = detect_scenes(input_video)
     except OSError as e:
         if "not found" in str(e).lower() or "not exist" in str(e).lower():
-            raise FileNotFoundError(f"scenedetect cannot read video (file may be corrupt): {input_video} ({file_size} bytes)") from e
-        raise
+            raise FileNotFoundError(
+                f"scenedetect cannot read video (file may be corrupt): {input_video} ({file_size} bytes)"
+            ) from e
+        # Other OS errors: fall back to full-video processing below.
+        scenes = None
+        fps = None
+        print(f"   ⚠️  Scene detection failed (OSError). Falling back to full video as one scene. Error: {e}")
+    except Exception as e:
+        # SceneDetect can raise VideoOpenFailure or other backend-specific exceptions.
+        scenes = None
+        fps = None
+        print(f"   ⚠️  Scene detection failed. Falling back to full video as one scene. Error: {e}")
     
     if not scenes:
         print("   ❌ No scenes were detected. Using full video as one scene.")
-        # If scene detection fails or finds nothing, treat whole video as one scene
         cap = cv2.VideoCapture(input_video)
+        if not cap.isOpened():
+            cap.release()
+            raise IOError(f"Could not open video for fallback scene detection: {input_video}")
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
         cap.release()
+
+        if fps is None or not fps or fps <= 0:
+            fps = cap_fps if cap_fps > 0 else 30.0
+        if total_frames <= 0:
+            raise IOError(f"Could not determine total frames for: {input_video}")
+
         from scenedetect import FrameTimecode
         scenes = [(FrameTimecode(0, fps), FrameTimecode(total_frames, fps))]
 
@@ -1060,6 +1093,7 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
         print(f"   ✅ Final output: {final_w}x{final_h}, {final_frame_count} frames, {final_duration:.1f}s @ {final_fps}fps")
         if final_duration < 5:
             print(f"   ❌ Final video is suspiciously short ({final_duration:.1f}s). The input clip may be corrupted.")
+            return False
 
         return True
 

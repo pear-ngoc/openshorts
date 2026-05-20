@@ -704,28 +704,41 @@ def analyze_scenes_strategy(video_path, scenes):
     """
     Analyzes each scene to determine if it should be TRACK (Single person) or GENERAL (Group/Wide).
     Returns list of strategies corresponding to scenes.
+
+    Threshold logic:
+    - face_count == 0  -> GENERAL  (no face: landscape/B-roll → keep wide, blur background)
+    - 0 < face_count <= 2 -> TRACK  (1-2 faces: single/group → crop vertical, track subject)
+    - face_count > 2   -> GENERAL  (dense crowd: too many → keep wide, blur background)
     """
     cap = cv2.VideoCapture(video_path)
     strategies = []
-    
+
     if not cap.isOpened():
         return ['TRACK'] * len(scenes)
-        
+
+    track_count = 0
+    general_count = 0
+
     for start, end in tqdm(scenes, desc="   Analyzing Scenes"):
-        # Check single frame at the middle of the scene
         mid_frame = int((start.frame_num + end.frame_num) / 2)
-        
+
         cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame)
         ret, frame = cap.read()
-        
+
         face_count = 0
         if ret:
             candidates = detect_face_candidates(frame)
             face_count = len(candidates)
-        
-        strategies.append('GENERAL' if face_count > 2 else 'TRACK')
-            
+
+        if face_count == 0 or face_count > 2:
+            strategies.append('GENERAL')
+            general_count += 1
+        else:
+            strategies.append('TRACK')
+            track_count += 1
+
     cap.release()
+    print(f"   📊 Strategy summary: {track_count} TRACK, {general_count} GENERAL")
     return strategies
 
 def detect_scenes(video_path):
@@ -931,7 +944,6 @@ def process_video_to_vertical(input_video, final_output_video, temp_video_output
         # Pre-calculate scene boundaries
         scene_boundaries = []
         for s_start, s_end in scenes:
-            # SceneDetect FrameTimecode: get_frames() is deprecated
             scene_boundaries.append((s_start.frame_num, s_end.frame_num))
 
         # Global tracker for single-person shots

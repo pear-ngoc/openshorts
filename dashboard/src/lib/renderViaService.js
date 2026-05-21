@@ -1,8 +1,8 @@
 import { getApiUrl, RENDER_SERVICE_URL } from '../config';
 
 /**
- * Renders via the server-side render-service (FFmpeg/Remotion Lambda).
- * Polls for completion and returns a blob URL to the output MP4.
+ * Renders via the server-side render-service (Chromium + FFmpeg).
+ * Polls for completion, downloads the output, and uploads it to the backend.
  *
  * @param {object} params
  * @param {string} params.jobId - Backend job ID
@@ -14,7 +14,7 @@ import { getApiUrl, RENDER_SERVICE_URL } from '../config';
  * @param {object|null} params.effects - EffectsConfig
  * @param {function} [params.onProgress] - Progress callback (0-1)
  * @param {AbortSignal} [params.signal] - Abort signal for cancellation
- * @returns {Promise<string>} Blob URL of the rendered MP4
+ * @returns {Promise<{blobUrl: string, serverUrl: string, filename: string}>}
  */
 export async function renderViaService({
     jobId,
@@ -35,8 +35,12 @@ export async function renderViaService({
     console.log('[renderViaService] videoUrl:', videoUrl);
     console.log('[renderViaService] durationInFrames:', durationInFrames);
 
-    // Submit render job
-    const submitStart = performance.now();
+    // Resolve the video URL: if relative, prepend API base
+    const resolvedVideoUrl = videoUrl.startsWith('http')
+        ? videoUrl
+        : `${getApiUrl('')}${videoUrl}`;
+
+    // Step 1: Submit render job
     const submitResponse = await fetch(`${RENDER_SERVICE_URL}/render`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -44,7 +48,7 @@ export async function renderViaService({
             jobId,
             clipIndex,
             props: {
-                videoUrl,
+                videoUrl: resolvedVideoUrl,
                 durationInFrames,
                 fps,
                 width: 1080,
@@ -65,12 +69,14 @@ export async function renderViaService({
     const { renderId } = await submitResponse.json();
     console.log(`[renderViaService] Job submitted: ${renderId}`);
 
-    // Poll for completion
+    // Step 2: Poll for completion
     const pollStart = performance.now();
+    let outputUrl = null;
+
     while (true) {
         if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 2000));
 
         const statusResponse = await fetch(`${RENDER_SERVICE_URL}/render/${renderId}`, { signal });
         if (!statusResponse.ok) {
@@ -78,25 +84,66 @@ export async function renderViaService({
         }
 
         const status = await statusResponse.json();
-        console.log(`[renderViaService] Status: ${status.status} | Progress: ${Math.round((status.progress || 0) * 100)}%`);
+        const pct = Math.round((status.progress || 0) * 100);
+        console.log(`[renderViaService] Status: ${status.status} | Progress: ${pct}% | Elapsed: ${Math.round(performance.now() - pollStart)}ms`);
 
         if (onProgress && typeof onProgress === 'function') {
             onProgress(status.progress || 0);
         }
 
         if (status.status === 'done') {
-            console.log(`[renderViaService] Render done! Output: ${status.outputUrl}`);
-            console.log(`[renderViaService] Total elapsed: ${Math.round(performance.now() - pollStart)}ms`);
-
-            // Download output into a blob URL so callers can use it like renderInBrowser
-            const outputResponse = await fetch(status.outputUrl, { signal });
-            if (!outputResponse.ok) throw new Error(`Failed to fetch output: ${outputResponse.status}`);
-            const blob = await outputResponse.blob();
-            return URL.createObjectURL(blob);
+            outputUrl = status.outputUrl;
+            console.log(`[renderViaService] Render done! Output URL: ${outputUrl}`);
+            break;
         }
 
         if (status.status === 'error') {
             throw new Error(`Render service error: ${status.error}`);
         }
     }
+
+    // Step 3: Download output and create blob URL
+    console.log('[renderViaService] Downloading output...');
+    const outputResponse = await fetch(outputUrl, { signal });
+    if (!outputResponse.ok) {
+        throw new Error(`Failed to fetch output: ${outputResponse.status}`);
+    }
+
+    const blob = await outputResponse.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    console.log(`[renderViaService] Blob created: ${blobUrl} (${blob.size} bytes)`);
+
+    // Step 4: Upload blob to backend for persistence
+    console.log('[renderViaService] Uploading to backend for persistence...');
+    const formData = new FormData();
+    formData.append('job_id', jobId);
+    formData.append('clip_index', String(clipIndex));
+    formData.append('file', blob, `rendered_clip_${clipIndex}.mp4`);
+
+    let serverUrl = blobUrl; // fallback
+
+    try {
+        const saveResponse = await fetch(getApiUrl('/api/render/save'), {
+            method: 'POST',
+            body: formData,
+            signal,
+        });
+
+        if (saveResponse.ok) {
+            const saveData = await saveResponse.json();
+            serverUrl = getApiUrl(saveData.video_url);
+            console.log(`[renderViaService] Saved to server: ${serverUrl}`);
+        } else {
+            const errText = await saveResponse.text();
+            console.warn(`[renderViaService] Save failed (${saveResponse.status}): ${errText}, using blob URL`);
+        }
+    } catch (saveErr) {
+        console.warn('[renderViaService] Save error:', saveErr.message, '- using blob URL');
+    }
+
+    return {
+        blobUrl,
+        serverUrl,
+        filename: `${jobId}_clip_${clipIndex}.mp4`,
+    };
 }

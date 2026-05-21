@@ -1,15 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock, Languages, Send } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Calendar, Clock, Languages, Send } from 'lucide-react';
 import { getApiUrl } from '../config';
-import SubtitleModal from './SubtitleModal';
-import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
-import AutoEditModal from './AutoEditModal';
+import CombinedEditModal from './CombinedEditModal';
 import { renderViaService } from '../lib/renderViaService';
 
 export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, geminiBaseUrl, llmProvider, llmModel, elevenLabsKey, onPlay, onPause }) {
     const [showModal, setShowModal] = useState(false);
-    const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const videoRef = useRef(null);
 
     // Derived from the clip prop so it stays in sync during polling updates.
@@ -57,16 +54,13 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [posting, setPosting] = useState(false);
     const [postResult, setPostResult] = useState(null);
 
-    const [isEditing, setIsEditing] = useState(false);
-    const [isSubtitling, setIsSubtitling] = useState(false);
-    const [isHooking, setIsHooking] = useState(false);
     const [isTranslating, setIsTranslating] = useState(false);
     const [isSendingToTL, setIsSendingToTL] = useState(false);
     const [tlResult, setTLResult] = useState(null);
-    const [showHookModal, setShowHookModal] = useState(false);
     const [showTranslateModal, setShowTranslateModal] = useState(false);
-    const [showAutoEditModal, setShowAutoEditModal] = useState(false);
+    const [showCombinedModal, setShowCombinedModal] = useState(false);
     const [editError, setEditError] = useState(null);
+    const [processingStage, setProcessingStage] = useState(null);
 
     const [clipDuration, setClipDuration] = useState(clip.end && clip.start ? clip.end - clip.start : 30);
 
@@ -92,193 +86,62 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         }
     }, [showModal, clip]);
 
-    const handleAutoEdit = async (effectsConfig) => {
-        console.log('[AutoEdit] Applying effects from modal...');
-        setIsEditing(true);
+    /**
+     * Unified handler for combined editor - all layers applied in one render pass,
+     * output saved to server with proper naming, then reflected in the client.
+     */
+    const handleCombinedEdit = async ({
+        enableAutoEdit,
+        enableSubtitles,
+        enableHook,
+        effectsConfig,
+        subtitleConfig,
+        hookConfig,
+    }) => {
+        setProcessingStage('rendering');
         setEditError(null);
-        try {
-            const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
-            const baseUrl = geminiBaseUrl || localStorage.getItem('gemini_base_url');
-            const provider = llmProvider || localStorage.getItem('llm_provider') || 'gemini';
-            const model = llmModel || localStorage.getItem('llm_model') || '';
 
-            if (effectsConfig && effectsConfig.segments) {
-                console.log('[AutoEdit] Rendering effects with Remotion...');
-                const newLayers = { ...activeLayers, effects: effectsConfig };
-                setActiveLayers(newLayers);
-                const blobUrl = await renderViaService({
+        try {
+            const layers = {
+                subtitles: enableSubtitles && subtitleConfig ? subtitleConfig : null,
+                hook: enableHook && hookConfig ? hookConfig : null,
+                effects: enableAutoEdit && effectsConfig ? effectsConfig : null,
+            };
+            const hasAnyLayer = layers.subtitles || layers.hook || layers.effects;
+            let newVideoUrl = null;
+
+            if (hasAnyLayer) {
+                setProcessingStage('rendering');
+                const { blobUrl, serverUrl } = await renderViaService({
                     jobId,
                     clipIndex: index,
                     videoUrl: originalVideoUrl,
                     durationInSeconds: clipDuration,
-                    subtitles: newLayers.subtitles,
-                    hook: newLayers.hook,
-                    effects: newLayers.effects,
+                    subtitles: layers.subtitles,
+                    hook: layers.hook,
+                    effects: layers.effects,
                 });
-                console.log('[AutoEdit] Render complete, blob URL:', blobUrl);
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
-                return;
+
+                newVideoUrl = serverUrl || blobUrl;
+                setActiveLayers(layers);
             }
 
-            // Fallback: legacy FFmpeg edit endpoint (no modal effects)
-            const sendFilename = currentVideoUrl && !currentVideoUrl.startsWith('blob:')
-                ? currentVideoUrl.split('/').pop()
-                : undefined;
-
-            const res = await fetch(getApiUrl('/api/edit'), {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-LLM-Key': apiKey || '',
-                    'X-LLM-Provider': provider,
-                    ...(baseUrl?.trim() ? { 'X-LLM-Base-Url': baseUrl.trim() } : {}),
-                    ...(model?.trim() ? { 'X-LLM-Model': model.trim() } : {}),
-                },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: index,
-                    ...(sendFilename ? { input_filename: sendFilename } : {}),
-                }),
-            });
-
-            if (!res.ok) {
-                const errText = await res.text();
-                try {
-                    const jsonErr = JSON.parse(errText);
-                    throw new Error(jsonErr.detail || errText);
-                } catch (e) {
-                    throw new Error(errText);
-                }
-            }
-
-            const data = await res.json();
-            if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+            if (newVideoUrl) {
+                setCurrentVideoUrl(newVideoUrl);
                 if (videoRef.current) videoRef.current.load();
             }
 
+            setShowCombinedModal(false);
         } catch (e) {
-            console.error('[AutoEdit] Final catch block error:', e);
+            console.error('[CombinedEdit] Error:', e);
             setEditError(e.message);
-            setTimeout(() => setEditError(null), 5000);
+            setTimeout(() => setEditError(null), 8000);
         } finally {
-            setIsEditing(false);
+            setProcessingStage(null);
         }
     };
 
-    const handleSubtitle = async (options) => {
-        setIsSubtitling(true);
-        setEditError(null);
-        try {
-            if (options.remotion) {
-                // Accumulate layer and render all layers together
-                const newLayers = { ...activeLayers, subtitles: options.remotion };
-                setActiveLayers(newLayers);
-                const blobUrl = await renderViaService({
-                    jobId,
-                    clipIndex: index,
-                    videoUrl: originalVideoUrl,
-                    durationInSeconds: clipDuration,
-                    subtitles: newLayers.subtitles,
-                    hook: newLayers.hook,
-                    effects: newLayers.effects,
-                });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
-                setShowSubtitleModal(false);
-                return;
-            }
-
-            // Fallback: legacy FFmpeg
-            const res = await fetch(getApiUrl('/api/subtitle'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: index,
-                    position: options.position,
-                    font_size: options.fontSize,
-                    font_name: options.fontName,
-                    font_color: options.fontColor,
-                    border_color: options.borderColor,
-                    border_width: options.borderWidth,
-                    bg_color: options.bgColor,
-                    bg_opacity: options.bgOpacity,
-                    ...(currentVideoUrl && !currentVideoUrl.startsWith('blob:') ? { input_filename: currentVideoUrl.split('/').pop() } : {})
-                })
-            });
-
-            if (!res.ok) throw new Error(await res.text());
-            const data = await res.json();
-            if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                if (videoRef.current) videoRef.current.load();
-                setShowSubtitleModal(false);
-            }
-        } catch (e) {
-            setEditError(e.message);
-            setTimeout(() => setEditError(null), 5000);
-        } finally {
-            setIsSubtitling(false);
-        }
-    };
-
-    const handleHook = async (hookData) => {
-        setIsHooking(true);
-        setEditError(null);
-        try {
-            if (hookData.remotion) {
-                // Accumulate layer and render all layers together
-                const newLayers = { ...activeLayers, hook: hookData.remotion };
-                setActiveLayers(newLayers);
-                const blobUrl = await renderViaService({
-                    jobId,
-                    clipIndex: index,
-                    videoUrl: originalVideoUrl,
-                    durationInSeconds: clipDuration,
-                    subtitles: newLayers.subtitles,
-                    hook: newLayers.hook,
-                    effects: newLayers.effects,
-                });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
-                setShowHookModal(false);
-                return;
-            }
-
-            // Fallback: legacy FFmpeg
-            const payload = typeof hookData === 'string'
-                ? { text: hookData, position: 'top', size: 'M' }
-                : hookData;
-
-            const res = await fetch(getApiUrl('/api/hook'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: index,
-                    text: payload.text,
-                    position: payload.position,
-                    size: payload.size,
-                    ...(currentVideoUrl && !currentVideoUrl.startsWith('blob:') ? { input_filename: currentVideoUrl.split('/').pop() } : {})
-                })
-            });
-
-            if (!res.ok) throw new Error(await res.text());
-            const data = await res.json();
-            if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                if (videoRef.current) videoRef.current.load();
-                setShowHookModal(false);
-            }
-        } catch (e) {
-            setEditError(e.message);
-            setTimeout(() => setEditError(null), 5000);
-        } finally {
-            setIsHooking(false);
-        }
-    };
+    // Legacy: TranslateModal is still separate
 
     const handleTranslate = async (options) => {
         console.log('[Translate] Starting translation with options:', options);
@@ -438,12 +301,14 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     </span>
                 </div>
 
-                {/* Auto Edit Overlay if Processing */}
-                {isEditing && (
+                {/* Processing Overlay */}
+                {processingStage !== null && (
                     <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-10 p-4 text-center">
                         <Loader2 size={32} className="text-primary animate-spin mb-3" />
-                        <span className="text-xs font-bold text-white uppercase tracking-wider">AI Magic in Progress...</span>
-                        <span className="text-[10px] text-zinc-400 mt-1">Applying viral edits & zooms</span>
+                        <span className="text-xs font-bold text-white uppercase tracking-wider">
+                            {processingStage === 'saving' ? 'Saving...' : 'Rendering...'}
+                        </span>
+                        <span className="text-[10px] text-zinc-400 mt-1">Applying edits, subtitles & hooks</span>
                     </div>
                 )}
             </div>
@@ -510,31 +375,13 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                 setTimeout(() => setEditError(null), 5000);
                                 return;
                             }
-                            setShowAutoEditModal(true);
+                            setShowCombinedModal(true);
                         }}
-                        disabled={isEditing}
+                        disabled={processingStage !== null}
                         className="col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
-                        {isEditing ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {isEditing ? 'Editing...' : 'Auto Edit'}
-                    </button>
-
-                    <button
-                        onClick={() => setShowSubtitleModal(true)}
-                        disabled={isSubtitling}
-                        className="col-span-1 py-2 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isSubtitling ? <Loader2 size={14} className="animate-spin" /> : <Type size={14} />}
-                        {isSubtitling ? 'Adding...' : 'Subtitles'}
-                    </button>
-
-                    <button
-                        onClick={() => setShowHookModal(true)}
-                        disabled={isHooking}
-                        className="col-span-1 py-2 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black rounded-lg text-xs font-bold shadow-lg shadow-yellow-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isHooking ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {isHooking ? 'Adding...' : 'Viral Hook'}
+                        {processingStage !== null ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
+                        {processingStage !== null ? 'Editing...' : 'Edit All'}
                     </button>
 
                     <button
@@ -707,28 +554,6 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 </div>
             )}
 
-            <SubtitleModal
-                isOpen={showSubtitleModal}
-                onClose={() => setShowSubtitleModal(false)}
-                onGenerate={handleSubtitle}
-                isProcessing={isSubtitling}
-                videoUrl={originalVideoUrl}
-                jobId={jobId}
-                clipIndex={index}
-                existingHook={activeLayers.hook}
-            />
-
-            <HookModal
-                isOpen={showHookModal}
-                onClose={() => setShowHookModal(false)}
-                onGenerate={handleHook}
-                isProcessing={isHooking}
-                videoUrl={originalVideoUrl}
-                initialText={clip.viral_hook_text}
-                durationInSeconds={clip.end && clip.start ? clip.end - clip.start : 30}
-                existingSubtitles={activeLayers.subtitles}
-            />
-
             <TranslateModal
                 isOpen={showTranslateModal}
                 onClose={() => setShowTranslateModal(false)}
@@ -738,17 +563,16 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 hasApiKey={!!elevenLabsKey}
             />
 
-            <AutoEditModal
-                isOpen={showAutoEditModal}
-                onClose={() => setShowAutoEditModal(false)}
-                onApply={handleAutoEdit}
-                isProcessing={isEditing}
+            <CombinedEditModal
+                isOpen={showCombinedModal}
+                onClose={() => setShowCombinedModal(false)}
+                onSubmit={handleCombinedEdit}
+                isProcessing={processingStage !== null}
+                processingStage={processingStage}
                 videoUrl={originalVideoUrl}
                 jobId={jobId}
                 clipIndex={index}
                 clipDuration={clipDuration}
-                existingSubtitles={activeLayers.subtitles}
-                existingHook={activeLayers.hook}
                 apiKey={geminiApiKey || localStorage.getItem('gemini_key')}
                 baseUrl={geminiBaseUrl || localStorage.getItem('gemini_base_url')}
                 provider={llmProvider || localStorage.getItem('llm_provider') || 'gemini'}

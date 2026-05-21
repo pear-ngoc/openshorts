@@ -980,6 +980,42 @@ async def proxy_render_status(render_id: str):
         raise HTTPException(status_code=502, detail=f"Render service unavailable: {e}")
 
 
+@app.post("/api/render/save")
+async def save_rendered_video(
+    job_id: str = Form(...),
+    clip_index: int = Form(...),
+    file: UploadFile = File(...),
+):
+    """
+    Receives a rendered video blob from the frontend (after browser download),
+    saves it to the output directory with proper naming, and returns the URL.
+    """
+    try:
+        job_output_dir = os.path.join(OUTPUT_DIR, job_id)
+        os.makedirs(job_output_dir, exist_ok=True)
+
+        # Build filename like: {job_id}_clip_{index}.mp4
+        ext = os.path.splitext(file.filename)[1] if file.filename else ".mp4"
+        safe_name = f"{job_id}_clip_{clip_index}{ext}"
+        output_path = os.path.join(job_output_dir, safe_name)
+
+        content = await file.read()
+        with open(output_path, "wb") as f:
+            f.write(content)
+
+        video_url = f"/videos/{job_id}/{safe_name}"
+        logger.info(f"[render/save] Saved: {output_path} ({len(content)} bytes)")
+
+        return {
+            "video_url": video_url,
+            "filename": safe_name,
+            "size": len(content),
+        }
+    except Exception as e:
+        logger.error(f"[render/save] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class EffectsGenerateRequest(BaseModel):
     job_id: str
     clip_index: int

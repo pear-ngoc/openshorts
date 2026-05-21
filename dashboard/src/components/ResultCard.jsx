@@ -5,6 +5,15 @@ import TranslateModal from './TranslateModal';
 import CombinedEditModal from './CombinedEditModal';
 import { renderViaService } from '../lib/renderViaService';
 
+function downloadBlobUrl(blobUrl, filename = 'output.mp4') {
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
 export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, geminiBaseUrl, llmProvider, llmModel, elevenLabsKey, onPlay, onPause }) {
     const [showModal, setShowModal] = useState(false);
     const videoRef = useRef(null);
@@ -34,6 +43,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
     // Accumulate Remotion layers across operations
     const [activeLayers, setActiveLayers] = useState({ subtitles: null, hook: null, effects: null });
+
+    // Tracks the blob URL of the most recent rendered video for download
+    const [renderedBlobUrl, setRenderedBlobUrl] = useState(null);
 
     // Reset Remotion layers when the base clip changes, since those layers
     // are tied to the original source video.
@@ -123,6 +135,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 });
 
                 newVideoUrl = serverUrl || blobUrl;
+                setRenderedBlobUrl(blobUrl);
                 setActiveLayers(layers);
             }
 
@@ -403,10 +416,16 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         onClick={async (e) => {
                             e.preventDefault();
                             e.stopPropagation();
+
+                            // Download rendered video if available
+                            if (renderedBlobUrl) {
+                                downloadBlobUrl(renderedBlobUrl, `clip-${index + 1}-rendered.mp4`);
+                                return;
+                            }
+
                             setIsSendingToTL(true);
                             setTLResult(null);
                             try {
-                                // Download video
                                 const response = await fetch(currentVideoUrl);
                                 if (!response.ok) throw new Error('Download failed');
                                 const blob = await response.blob();
@@ -436,10 +455,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             }
                         }}
                         disabled={isSendingToTL}
-                        className="col-span-1 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
+                        className={`col-span-1 py-2 rounded-lg text-xs font-medium transition-all active:scale-[0.98] flex items-center justify-center gap-2 border truncate px-2 ${renderedBlobUrl ? 'bg-green-500/20 border-green-500/30 text-green-400 hover:bg-green-500/30 shadow-green-500/10 shadow-lg' : 'bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white border-white/5'}`}
                     >
                         {isSendingToTL ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} className="shrink-0" />}
-                        {isSendingToTL ? 'Processing...' : 'Download'}
+                        {isSendingToTL ? 'Processing...' : renderedBlobUrl ? 'Download Rendered' : 'Download'}
                     </button>
                 </div>
             </div>
@@ -577,6 +596,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 baseUrl={geminiBaseUrl || localStorage.getItem('gemini_base_url')}
                 provider={llmProvider || localStorage.getItem('llm_provider') || 'gemini'}
                 model={llmModel || localStorage.getItem('llm_model') || ''}
+                existingHook={clip.viral_hook_text || ''}
             />
 
         </div>

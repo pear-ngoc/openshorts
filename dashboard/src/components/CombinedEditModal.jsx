@@ -56,6 +56,7 @@ export default function CombinedEditModal({
     baseUrl,
     provider,
     model,
+    existingHook,
 }) {
     const [durationSec, setDurationSec] = useState(clipDuration || 30);
 
@@ -87,7 +88,7 @@ export default function CombinedEditModal({
     const [originalCaptions, setOriginalCaptions] = useState([]);
 
     // Hook state
-    const [hookText, setHookText] = useState('');
+    const [hookText, setHookText] = useState(existingHook || '');
     const [hookPosition, setHookPosition] = useState('top');
     const [hookSize, setHookSize] = useState('M');
     const [hookEntrance, setHookEntrance] = useState('spring');
@@ -100,7 +101,12 @@ export default function CombinedEditModal({
         hook: false,
     });
 
-    // Fetch clip duration & captions on open
+    // Sync hook text when modal opens with a new clip
+    useEffect(() => {
+        if (isOpen && existingHook) {
+            setHookText(existingHook);
+        }
+    }, [isOpen, existingHook]);
     useEffect(() => {
         if (!isOpen || !jobId || clipIndex === undefined) return;
 

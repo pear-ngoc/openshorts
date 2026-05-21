@@ -1,5 +1,5 @@
 import React from "react";
-import { Composition } from "remotion";
+import { Composition, type CalculatedMetadataInput } from "remotion";
 import { ShortVideo } from "./compositions/ShortVideo";
 import type { ShortVideoProps } from "./lib/types";
 import { shortVideoPropsSchema } from "./lib/types";
@@ -72,19 +72,37 @@ const DEFAULT_PROPS: ShortVideoProps = {
   },
 };
 
+/**
+ * Reads duration from inputProps. Falls back to DEFAULT_PROPS if unavailable
+ * (e.g., during Remotion Studio Hub static analysis).
+ */
+const getDurationInFrames = (props: ShortVideoProps | null): number => {
+    if (props && typeof props.durationInFrames === 'number' && props.durationInFrames > 0) {
+        return props.durationInFrames;
+    }
+    return DEFAULT_PROPS.durationInFrames;
+};
+
 export const RemotionRoot: React.FC = () => {
-  return (
-    <>
-      <Composition
-        id="ShortVideo"
-        schema={shortVideoPropsSchema}
-        component={ShortVideo}
-        durationInFrames={DEFAULT_PROPS.durationInFrames}
-        fps={DEFAULT_PROPS.fps}
-        width={DEFAULT_PROPS.width}
-        height={DEFAULT_PROPS.height}
-        defaultProps={DEFAULT_PROPS}
-      />
-    </>
-  );
+    return (
+        <>
+            <Composition
+                id="ShortVideo"
+                schema={shortVideoPropsSchema}
+                component={ShortVideo}
+                durationInFrames={DEFAULT_PROPS.durationInFrames}
+                fps={DEFAULT_PROPS.fps}
+                width={DEFAULT_PROPS.width}
+                height={DEFAULT_PROPS.height}
+                defaultProps={DEFAULT_PROPS}
+                calculateMetadata={({ props }: CalculatedMetadataInput<ShortVideoProps>) => {
+                    const typedProps = props as ShortVideoProps;
+                    return {
+                        props: typedProps,
+                        durationInFrames: getDurationInFrames(typedProps),
+                    };
+                }}
+            />
+        </>
+    );
 };

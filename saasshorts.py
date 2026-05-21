@@ -1061,6 +1061,21 @@ def _format_ass_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
+def _get_whisper_device():
+    """Return (device, compute_type) tuple, reusing GPU detection from main.py."""
+    try:
+        from main import CUDA_DEVICE, CUDA_COMPUTE
+        return CUDA_DEVICE, CUDA_COMPUTE
+    except (ImportError, AttributeError):
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "cuda", "float16"
+        except ImportError:
+            pass
+        return "cpu", "int8"
+
+
 def transcribe_audio_for_subs(audio_path: str) -> list:
     """
     Transcribe audio with word-level timestamps using faster-whisper.
@@ -1068,8 +1083,9 @@ def transcribe_audio_for_subs(audio_path: str) -> list:
     """
     from faster_whisper import WhisperModel
 
-    print(f"[SaaSShorts] 🎙️ Transcribing audio for subtitles...")
-    model = WhisperModel("base", device="cpu", compute_type="int8")
+    device, compute = _get_whisper_device()
+    print(f"[SaaSShorts] 🎙️ Transcribing audio for subtitles ({device.upper()} / {compute})...")
+    model = WhisperModel("base", device=device, compute_type=compute)
     segments, info = model.transcribe(audio_path, word_timestamps=True)
 
     words = []

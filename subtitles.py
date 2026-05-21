@@ -2,6 +2,23 @@ import os
 import subprocess
 
 
+def _get_whisper_device():
+    """Return (device, compute_type) tuple, reusing GPU detection from main.py."""
+    try:
+        # Import GPU detection constants from main.py if available
+        from main import CUDA_DEVICE, CUDA_COMPUTE
+        return CUDA_DEVICE, CUDA_COMPUTE
+    except (ImportError, AttributeError):
+        # Fallback: detect GPU via torch directly
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "cuda", "float16"
+        except ImportError:
+            pass
+        return "cpu", "int8"
+
+
 def transcribe_audio(video_path):
     """
     Transcribe audio from a video file using faster-whisper.
@@ -9,10 +26,9 @@ def transcribe_audio(video_path):
     """
     from faster_whisper import WhisperModel
 
-    print(f"🎙️  Transcribing audio from: {video_path}")
-
-    # Run on CPU with INT8 quantization for speed
-    model = WhisperModel("base", device="cpu", compute_type="int8")
+    device, compute = _get_whisper_device()
+    print(f"🎙️  Transcribing audio from: {video_path} ({device.upper()} / {compute})")
+    model = WhisperModel("base", device=device, compute_type=compute)
 
     segments, info = model.transcribe(video_path, word_timestamps=True)
 

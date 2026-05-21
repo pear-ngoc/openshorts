@@ -1220,7 +1220,7 @@ def _transcribe_groq_chunk(audio_path: str, chunk_offset: float, chunk_index: in
             model=GROQ_MODEL,
             file=audio_file,
             response_format="verbose_json",
-            timestamp_granularities=["segment"],
+            timestamp_granularities=["segment", "word"],
         )
 
     elapsed = time.time() - start_time

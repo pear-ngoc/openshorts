@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  server: {
+    server: {
     allowedHosts: [
       'openshorts.app',
       'www.openshorts.app'
@@ -33,7 +33,12 @@ export default defineConfig({
       '/render': {
         target: 'http://renderer:3100',
         changeOrigin: true,
-      }
+      },
+      '/render/output': {
+        target: 'http://renderer:3100',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/render\/output/, '/output'),
+      },
     }
   }
 })

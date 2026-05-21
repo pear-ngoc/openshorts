@@ -3,6 +3,8 @@
 // Otherwise, default to empty string which means relative paths (proxied in dev).
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+// Render service: use relative path (/render) to leverage Vite proxy to http://renderer:3100
+export const RENDER_SERVICE_URL = import.meta.env.VITE_RENDER_SERVICE_URL || '';
 
 export const getApiUrl = (path) => {
     if (!path) return '';

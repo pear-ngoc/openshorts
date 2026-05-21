@@ -24,41 +24,111 @@ export async function renderInBrowser({
     onProgress,
     signal,
 }) {
+    console.log('[renderInBrowser] Starting render...');
+    console.log('[renderInBrowser] videoUrl:', videoUrl);
+    console.log('[renderInBrowser] durationInSeconds:', durationInSeconds);
+    console.log('[renderInBrowser] subtitles:', subtitles);
+    console.log('[renderInBrowser] hook:', hook);
+    console.log('[renderInBrowser] effects:', effects);
+
     const fps = 30;
     const durationInFrames = Math.max(1, Math.round(durationInSeconds * fps));
+    console.log('[renderInBrowser] fps:', fps, '| durationInFrames:', durationInFrames);
 
-    const { getBlob } = await renderMediaOnWeb({
-        composition: {
-            component: ShortVideo,
-            durationInFrames,
-            fps,
-            width: 1080,
-            height: 1920,
-            id: 'ShortVideo',
-            calculateMetadata: null,
-        },
-        inputProps: {
-            videoUrl,
-            durationInFrames,
-            fps,
-            width: 1080,
-            height: 1920,
-            subtitles,
-            hook,
-            effects,
-        },
-        container: 'mp4',
-        videoCodec: 'h264',
-        videoBitrate: 'high',
-        audioCodec: 'aac',
-        onProgress: onProgress
-            ? ({ progress }) => onProgress(progress)
-            : undefined,
-        signal,
-    });
+    // Fetch video into a Blob URL so Remotion WebCodecs can access it
+    // (Remotion runs in a Web Worker where Vite proxy / relative URLs may not resolve)
+    console.log('[renderInBrowser] Fetching video into memory...');
+    const videoFetchStart = performance.now();
+    let resolvedVideoUrl = videoUrl;
+    if (!videoUrl.startsWith('blob:')) {
+        try {
+            console.log('[renderInBrowser] Fetching from:', videoUrl);
+            const response = await fetch(videoUrl, { signal });
+            if (!response.ok) {
+                throw new Error(`Failed to fetch video: ${response.status} ${response.statusText}`);
+            }
+            const videoBlob = await response.blob();
+            console.log('[renderInBrowser] Video fetched, size:', videoBlob.size, 'bytes, type:', videoBlob.type, 'elapsed:', Math.round(performance.now() - videoFetchStart) + 'ms');
+            resolvedVideoUrl = URL.createObjectURL(videoBlob);
+            console.log('[renderInBrowser] Blob URL:', resolvedVideoUrl);
+        } catch (fetchErr) {
+            console.error('[renderInBrowser] Video fetch error:', fetchErr.message);
+            throw fetchErr;
+        }
+    } else {
+        console.log('[renderInBrowser] Video already a blob URL, using as-is.');
+    }
 
+    console.log('[renderInBrowser] Calling renderMediaOnWeb...');
+    const startTime = performance.now();
+
+    let getBlob;
+    try {
+        console.log('[renderInBrowser] Checking WebCodecs support...');
+        if (!('VideoEncoder' in window)) {
+            console.error('[renderInBrowser] WebCodecs NOT supported in this browser!');
+            throw new Error('WebCodecs is not supported in this browser. Please use Chrome 94+ or Edge 94+.');
+        }
+        console.log('[renderInBrowser] WebCodecs supported.');
+
+        const result = await renderMediaOnWeb({
+            licenseKey: 'free-license',
+            delayRenderTimeoutInMilliseconds: 300000,
+            chromiumOptions: {
+                hardwareAcceleration: 'enable',
+            },
+            composition: {
+                component: ShortVideo,
+                durationInFrames,
+                fps,
+                width: 1080,
+                height: 1920,
+                id: 'ShortVideo',
+                calculateMetadata: null,
+            },
+            inputProps: {
+                videoUrl: resolvedVideoUrl,
+                durationInFrames,
+                fps,
+                width: 1080,
+                height: 1920,
+                subtitles,
+                hook,
+                effects,
+            },
+            logLevel: 'verbose',
+            onProgress: onProgress
+                ? ({ progress }) => {
+                      console.log('[renderInBrowser] Progress:', Math.round(progress * 100) + '%');
+                      onProgress(progress);
+                  }
+                : undefined,
+            signal,
+        });
+        getBlob = result.getBlob;
+        console.log('[renderInBrowser] renderMediaOnWeb returned, elapsed:', Math.round(performance.now() - startTime) + 'ms');
+    } catch (err) {
+        console.error('[renderInBrowser] renderMediaOnWeb ERROR:', err.message);
+        console.error('[renderInBrowser] Error stack:', err.stack);
+        throw err;
+    }
+
+    console.log('[renderInBrowser] Getting blob...');
+    const blobStart = performance.now();
     const blob = await getBlob();
-    return URL.createObjectURL(blob);
+    console.log('[renderInBrowser] getBlob elapsed:', Math.round(performance.now() - blobStart) + 'ms', '| blob size:', blob?.size, 'bytes | blob type:', blob?.type);
+
+    const blobUrl = URL.createObjectURL(blob);
+    console.log('[renderInBrowser] Blob URL created:', blobUrl);
+    console.log('[renderInBrowser] Render complete, total elapsed:', Math.round(performance.now() - startTime) + 'ms');
+
+    // Cleanup the blob URL we created (don't clean external blob: or http: URLs)
+    if (!videoUrl.startsWith('blob:') && resolvedVideoUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(resolvedVideoUrl);
+        console.log('[renderInBrowser] Revoked temp blob URL.');
+    }
+
+    return blobUrl;
 }
 
 /**

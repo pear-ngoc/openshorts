@@ -72,19 +72,19 @@ export async function executeRender(params: RenderParams): Promise<void> {
       crf: 22,
       outputLocation,
       onProgress: ({ progress }) => {
-        const percent = Math.round(progress * 100);
-        job.progress = percent;
+        job.progress = Math.min(progress, 1);
 
+        const percent = Math.round(progress * 100);
         if (percent % 10 === 0) {
           console.log(`[render-worker] ${renderId} progress: ${percent}%`);
         }
       },
     });
 
-    // Success
+    // Success - return URL via /render/output proxy to renderer:3100
     job.status = "done";
-    job.progress = 100;
-    job.outputUrl = outputLocation;
+    job.progress = 1;
+    job.outputUrl = `/render/output/${jobId}/${outputFileName}`;
 
     console.log(`[render-worker] Render ${renderId} completed: ${outputLocation}`);
   } catch (err) {

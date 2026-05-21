@@ -5,7 +5,7 @@ import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import AutoEditModal from './AutoEditModal';
-import { renderInBrowser } from '../lib/renderInBrowser';
+import { renderViaService } from '../lib/renderViaService';
 
 export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, geminiBaseUrl, llmProvider, llmModel, elevenLabsKey, onPlay, onPause }) {
     const [showModal, setShowModal] = useState(false);
@@ -106,7 +106,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 console.log('[AutoEdit] Rendering effects with Remotion...');
                 const newLayers = { ...activeLayers, effects: effectsConfig };
                 setActiveLayers(newLayers);
-                const blobUrl = await renderInBrowser({
+                const blobUrl = await renderViaService({
+                    jobId,
+                    clipIndex: index,
                     videoUrl: originalVideoUrl,
                     durationInSeconds: clipDuration,
                     subtitles: newLayers.subtitles,
@@ -173,7 +175,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 // Accumulate layer and render all layers together
                 const newLayers = { ...activeLayers, subtitles: options.remotion };
                 setActiveLayers(newLayers);
-                const blobUrl = await renderInBrowser({
+                const blobUrl = await renderViaService({
+                    jobId,
+                    clipIndex: index,
                     videoUrl: originalVideoUrl,
                     durationInSeconds: clipDuration,
                     subtitles: newLayers.subtitles,
@@ -228,7 +232,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 // Accumulate layer and render all layers together
                 const newLayers = { ...activeLayers, hook: hookData.remotion };
                 setActiveLayers(newLayers);
-                const blobUrl = await renderInBrowser({
+                const blobUrl = await renderViaService({
+                    jobId,
+                    clipIndex: index,
                     videoUrl: originalVideoUrl,
                     durationInSeconds: clipDuration,
                     subtitles: newLayers.subtitles,

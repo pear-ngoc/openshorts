@@ -30,14 +30,14 @@ export default defineConfig({
         target: 'http://backend:8000',
         changeOrigin: true,
       },
-      '/render': {
-        target: 'http://renderer:3100',
-        changeOrigin: true,
-      },
       '/render/output': {
         target: 'http://renderer:3100',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/render\/output/, '/output'),
+      },
+      '/render': {
+        target: 'http://renderer:3100',
+        changeOrigin: true,
       },
     }
   }

@@ -23,8 +23,13 @@ function normalizeOutputUrl(rawUrl, jobId) {
 
     const relPrefix = '/render/output/';
     if (rawUrl.startsWith(relPrefix)) {
-        const remainder = rawUrl.slice(relPrefix.length);
-        return `/videos/${jobId}/${remainder}`;
+        const withoutPrefix = rawUrl.slice(relPrefix.length); // "<jobId>/<filename>"
+        const firstSlash = withoutPrefix.indexOf('/');
+        if (firstSlash > 0) {
+            const rid = withoutPrefix.slice(0, firstSlash);
+            const filename = withoutPrefix.slice(firstSlash + 1);
+            return `/videos/${rid}/${filename}`;
+        }
     }
 
     console.warn(`[renderViaService] Unknown output URL format: ${rawUrl}`);

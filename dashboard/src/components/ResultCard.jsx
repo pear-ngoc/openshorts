@@ -5,13 +5,24 @@ import TranslateModal from './TranslateModal';
 import CombinedEditModal from './CombinedEditModal';
 import { renderViaService } from '../lib/renderViaService';
 
-function downloadBlobUrl(blobUrl, filename = 'output.mp4') {
-    const link = document.createElement('a');
-    link.href = blobUrl;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+async function fetchAndDownload(url, filename, jobId, clipIndex) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Download failed');
+    const blob = await response.blob();
+    const objUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = objUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(objUrl);
+    document.body.removeChild(a);
+    fetch(getApiUrl('/api/jobs/downloaded'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: jobId, clip_index: clipIndex })
+    }).catch(() => {});
 }
 
 export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, geminiBaseUrl, llmProvider, llmModel, elevenLabsKey, onPlay, onPause }) {
@@ -24,10 +35,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     // Active video source for the player; guarded against stale polling
     const [currentVideoUrl, setCurrentVideoUrl] = useState(originalVideoUrl);
 
-    // Track the most recent server-rendered URL + metadata (for download & cache-bust)
-    const [latestRenderedUrl, setLatestRenderedUrl] = useState(null);
-    const [latestRenderVersion, setLatestRenderVersion] = useState(null);
-    const [latestDownloadFilename, setLatestDownloadFilename] = useState(null);
+    // Track all rendered outputs from this card; newest is always at end.
+    // Each entry: { blobUrl, serverUrl, filename, version }
+    const [renderedOutputs, setRenderedOutputs] = useState([]);
 
     // Sync originalVideoUrl when the server prop changes (e.g., job re-poll).
     // Does NOT reset currentVideoUrl if we have a pending local render — the
@@ -37,7 +47,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         if (newUrl !== originalVideoUrl) {
             setOriginalVideoUrl(newUrl);
             // Only sync currentVideoUrl when there's no pending local render
-            if (!latestRenderedUrl) {
+            if (renderedOutputs.length === 0) {
                 setCurrentVideoUrl(newUrl);
             }
         }
@@ -108,6 +118,30 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
      * Unified handler for combined editor - all layers applied in one render pass,
      * output saved to server with proper naming, then reflected in the client.
      */
+    // Derive the most recent render output
+    const latestOutput = renderedOutputs.length > 0
+        ? renderedOutputs[renderedOutputs.length - 1]
+        : null;
+
+    // Callback for the modal's Download Latest button
+    const handleDownloadLatest = async () => {
+        if (!latestOutput) return;
+        const { serverUrl, blobUrl, filename, version } = latestOutput;
+        const urlToFetch = version
+            ? `${serverUrl || blobUrl}?v=${version}`
+            : (serverUrl || blobUrl);
+        try {
+            await fetchAndDownload(urlToFetch, filename, jobId, index);
+        } catch (err) {
+            console.error('Download error:', err);
+        }
+    };
+
+    // Reset rendered outputs when the base clip changes
+    useEffect(() => {
+        setRenderedOutputs([]);
+    }, [originalVideoUrl]);
+
     const handleCombinedEdit = async ({
         enableAutoEdit,
         enableSubtitles,
@@ -126,7 +160,6 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 effects: enableAutoEdit && effectsConfig ? effectsConfig : null,
             };
             const hasAnyLayer = layers.subtitles || layers.hook || layers.effects;
-            let newVideoUrl = null;
 
             if (hasAnyLayer) {
                 setProcessingStage('rendering');
@@ -140,16 +173,18 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     effects: layers.effects,
                 });
 
-                newVideoUrl = result.serverUrl || result.blobUrl;
+                const latestOutput = {
+                    blobUrl: result.blobUrl,
+                    serverUrl: result.serverUrl,
+                    filename: result.filename,
+                    version: result.version,
+                };
 
-                // Build cache-busted player URL
+                setRenderedOutputs(prev => [...prev, latestOutput]);
+
                 const playerUrl = result.version
                     ? `${result.serverUrl || result.blobUrl}?v=${result.version}`
                     : (result.serverUrl || result.blobUrl);
-
-                setLatestRenderedUrl(result.serverUrl || result.blobUrl);
-                setLatestRenderVersion(result.version);
-                setLatestDownloadFilename(result.filename);
                 setCurrentVideoUrl(playerUrl);
                 setActiveLayers(layers);
                 if (videoRef.current) videoRef.current.load();
@@ -216,9 +251,12 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             if (data.new_video_url) {
                 const newUrl = getApiUrl(data.new_video_url);
                 setCurrentVideoUrl(newUrl);
-                setLatestRenderedUrl(newUrl);
-                setLatestDownloadFilename(`${jobId}_clip_${index + 1}.mp4`);
-                setLatestRenderVersion(null);
+                setRenderedOutputs(prev => [...prev, {
+                    blobUrl: null,
+                    serverUrl: newUrl,
+                    filename: `${jobId}_clip_${index + 1}.mp4`,
+                    version: null,
+                }]);
                 if (videoRef.current) {
                     videoRef.current.load();
                 }
@@ -432,30 +470,14 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             e.preventDefault();
                             e.stopPropagation();
 
-                            // Use the latest server-rendered URL if available
-                            if (latestRenderedUrl) {
-                                const urlToFetch = latestRenderVersion
-                                    ? `${latestRenderedUrl}?v=${latestRenderVersion}`
-                                    : latestRenderedUrl;
+                            if (latestOutput) {
+                                const { serverUrl, blobUrl, filename, version } = latestOutput;
+                                const urlToFetch = version
+                                    ? `${serverUrl || blobUrl}?v=${version}`
+                                    : (serverUrl || blobUrl);
                                 setIsSendingToTL(true);
                                 try {
-                                    const response = await fetch(urlToFetch);
-                                    if (!response.ok) throw new Error('Download failed');
-                                    const blob = await response.blob();
-                                    const objUrl = window.URL.createObjectURL(blob);
-                                    const a = document.createElement('a');
-                                    a.style.display = 'none';
-                                    a.href = objUrl;
-                                    a.download = latestDownloadFilename || `${jobId}_clip_${index + 1}.mp4`;
-                                    document.body.appendChild(a);
-                                    a.click();
-                                    window.URL.revokeObjectURL(objUrl);
-                                    document.body.removeChild(a);
-                                    fetch(getApiUrl('/api/jobs/downloaded'), {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ job_id: jobId, clip_index: index })
-                                    }).catch(() => {});
+                                    await fetchAndDownload(urlToFetch, filename, jobId, index);
                                     setTLResult({ success: true, msg: 'Downloaded!' });
                                 } catch (err) {
                                     console.error('Download error:', err);
@@ -498,10 +520,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             }
                         }}
                         disabled={isSendingToTL}
-                        className={`col-span-1 py-2 rounded-lg text-xs font-medium transition-all active:scale-[0.98] flex items-center justify-center gap-2 border truncate px-2 ${latestRenderedUrl ? 'bg-green-500/20 border-green-500/30 text-green-400 hover:bg-green-500/30 shadow-green-500/10 shadow-lg' : 'bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white border-white/5'}`}
+                        className={`col-span-1 py-2 rounded-lg text-xs font-medium transition-all active:scale-[0.98] flex items-center justify-center gap-2 border truncate px-2 ${latestOutput ? 'bg-green-500/20 border-green-500/30 text-green-400 hover:bg-green-500/30 shadow-green-500/10 shadow-lg' : 'bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white border-white/5'}`}
                     >
                         {isSendingToTL ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} className="shrink-0" />}
-                        {isSendingToTL ? 'Processing...' : latestRenderedUrl ? 'Download Rendered' : 'Download'}
+                        {isSendingToTL ? 'Processing...' : latestOutput ? 'Download Rendered' : 'Download'}
                     </button>
                 </div>
             </div>
@@ -640,6 +662,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 provider={llmProvider || localStorage.getItem('llm_provider') || 'gemini'}
                 model={llmModel || localStorage.getItem('llm_model') || ''}
                 existingHook={clip.viral_hook_text || ''}
+                renderedOutputs={renderedOutputs}
+                onDownloadLatest={handleDownloadLatest}
             />
 
         </div>

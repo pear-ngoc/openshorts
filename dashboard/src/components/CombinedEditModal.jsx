@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { X, Wand2, Type, Sparkles, Loader2, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Eye, EyeOff } from 'lucide-react';
+import { X, Wand2, Type, Sparkles, Loader2, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Eye, EyeOff, Download } from 'lucide-react';
 import { getApiUrl } from '../config';
 import RemotionPreview from './RemotionPreview';
 
@@ -57,6 +57,8 @@ export default function CombinedEditModal({
     provider,
     model,
     existingHook,
+    renderedOutputs,
+    onDownloadLatest,
 }) {
     const [durationSec, setDurationSec] = useState(clipDuration || 30);
 
@@ -69,6 +71,28 @@ export default function CombinedEditModal({
     const [effectsConfig, setEffectsConfig] = useState(null);
     const [autoEditLoading, setAutoEditLoading] = useState(false);
     const [autoEditError, setAutoEditError] = useState(null);
+
+    // Download state
+    const [isDownloading, setIsDownloading] = useState(false);
+    const [downloadError, setDownloadError] = useState(null);
+
+    // Derive latest render output
+    const latestOutput = renderedOutputs && renderedOutputs.length > 0
+        ? renderedOutputs[renderedOutputs.length - 1]
+        : null;
+
+    const handleDownload = async () => {
+        if (!latestOutput || isDownloading) return;
+        setIsDownloading(true);
+        setDownloadError(null);
+        try {
+            await onDownloadLatest();
+        } catch (err) {
+            setDownloadError('Download failed');
+        } finally {
+            setIsDownloading(false);
+        }
+    };
 
     // Subtitle state
     const [subPosition, setSubPosition] = useState('bottom');
@@ -105,6 +129,9 @@ export default function CombinedEditModal({
     useEffect(() => {
         if (isOpen && existingHook) {
             setHookText(existingHook);
+        }
+        if (isOpen) {
+            setDownloadError(null);
         }
     }, [isOpen, existingHook]);
 
@@ -492,24 +519,53 @@ export default function CombinedEditModal({
 
                     </div>
 
-                    {/* Submit */}
-                    <button
-                        onClick={() => {
-                            onSubmit({
-                                enableAutoEdit,
-                                enableSubtitles,
-                                enableHook,
-                                effectsConfig: enableAutoEdit ? effectsConfig : null,
-                                subtitleConfig: enableSubtitles ? subtitleConfig : null,
-                                hookConfig: enableHook && hookText.trim() ? hookConfig : null,
-                            });
-                        }}
-                        disabled={!canSubmit}
-                        className="w-full py-3 mt-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold rounded-xl shadow-lg transition-all active:scale-[0.98] flex items-center justify-center gap-2 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                        {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Wand2 size={20} />}
-                        {isProcessing ? 'Processing...' : 'Render All'}
-                    </button>
+                    {/* Render + Download row */}
+                    <div className="flex gap-2 mt-4 shrink-0">
+                        {/* Render All */}
+                        <button
+                            onClick={() => {
+                                onSubmit({
+                                    enableAutoEdit,
+                                    enableSubtitles,
+                                    enableHook,
+                                    effectsConfig: enableAutoEdit ? effectsConfig : null,
+                                    subtitleConfig: enableSubtitles ? subtitleConfig : null,
+                                    hookConfig: enableHook && hookText.trim() ? hookConfig : null,
+                                });
+                            }}
+                            disabled={!canSubmit}
+                            className="flex-1 py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold rounded-xl shadow-lg transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Wand2 size={20} />}
+                            {isProcessing ? 'Processing...' : 'Render All'}
+                        </button>
+
+                        {/* Download Latest */}
+                        <button
+                            onClick={handleDownload}
+                            disabled={!latestOutput || isDownloading}
+                            title={!latestOutput ? 'Render first to download' : undefined}
+                            className={`flex-1 py-3 rounded-xl font-bold shadow-lg transition-all active:scale-[0.98] flex items-center justify-center gap-2 ${
+                                latestOutput && !isDownloading
+                                    ? 'bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white shadow-green-500/20'
+                                    : 'bg-white/5 text-zinc-500 border border-white/5 cursor-not-allowed'
+                            }`}
+                        >
+                            {isDownloading ? (
+                                <Loader2 size={20} className="animate-spin" />
+                            ) : (
+                                <Download size={20} />
+                            )}
+                            {isDownloading ? 'Downloading...' : 'Download Latest'}
+                        </button>
+                    </div>
+
+                    {/* Download error */}
+                    {downloadError && (
+                        <div className="mt-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-xs text-center">
+                            {downloadError}
+                        </div>
+                    )}
                 </div>
             </div>
         </div>

@@ -39,6 +39,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     // Each entry: { blobUrl, serverUrl, filename, version }
     const [renderedOutputs, setRenderedOutputs] = useState([]);
 
+    // Live render progress (0..1) fed back from renderViaService during the render pass
+    const [renderProgress, setRenderProgress] = useState(0);
+
     // Sync originalVideoUrl when the server prop changes (e.g., job re-poll).
     // Does NOT reset currentVideoUrl if we have a pending local render — the
     // stale-guard in the render effect handles that.
@@ -163,6 +166,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
             if (hasAnyLayer) {
                 setProcessingStage('rendering');
+                setRenderProgress(0);
                 const result = await renderViaService({
                     jobId,
                     clipIndex: index,
@@ -171,6 +175,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     subtitles: layers.subtitles,
                     hook: layers.hook,
                     effects: layers.effects,
+                    onProgress: (p) => setRenderProgress(p),
                 });
 
                 const latestOutput = {
@@ -181,6 +186,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 };
 
                 setRenderedOutputs(prev => [...prev, latestOutput]);
+
+                setRenderProgress(0);
 
                 const playerUrl = result.version
                     ? `${result.serverUrl || result.blobUrl}?v=${result.version}`
@@ -194,6 +201,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         } catch (e) {
             console.error('[CombinedEdit] Error:', e);
             setEditError(e.message);
+            setRenderProgress(0);
             setTimeout(() => setEditError(null), 8000);
         } finally {
             setProcessingStage(null);
@@ -664,6 +672,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 existingHook={clip.viral_hook_text || ''}
                 renderedOutputs={renderedOutputs}
                 onDownloadLatest={handleDownloadLatest}
+                renderProgress={renderProgress}
             />
 
         </div>

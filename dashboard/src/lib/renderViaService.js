@@ -1,6 +1,37 @@
 import { getApiUrl, RENDER_SERVICE_URL } from '../config';
 
 /**
+ * Normalizes a render-service output URL to a /videos/ path consumable by the app.
+ *
+ * Handles:
+ *   - /render/output/<jobId>/<filename>           -> /videos/<jobId>/<filename>
+ *   - http://renderer:3100/render/output/...     -> /videos/<jobId>/<filename>
+ *   - /videos/<jobId>/<filename>                 -> /videos/<jobId>/<filename> (passthrough)
+ *
+ * Returns null if the URL cannot be normalized.
+ */
+function normalizeOutputUrl(rawUrl, jobId) {
+    if (!rawUrl) return null;
+
+    if (rawUrl.startsWith('/videos/')) return rawUrl;
+
+    const rendererBase = `${RENDER_SERVICE_URL}/render/output/`;
+    if (rawUrl.startsWith(rendererBase)) {
+        const filename = rawUrl.slice(rendererBase.length);
+        return `/videos/${jobId}/${filename}`;
+    }
+
+    const relPrefix = '/render/output/';
+    if (rawUrl.startsWith(relPrefix)) {
+        const remainder = rawUrl.slice(relPrefix.length);
+        return `/videos/${jobId}/${remainder}`;
+    }
+
+    console.warn(`[renderViaService] Unknown output URL format: ${rawUrl}`);
+    return null;
+}
+
+/**
  * Renders via the server-side render-service (Chromium + FFmpeg).
  * Polls for completion, downloads the output, and uploads it to the backend.
  *
@@ -14,7 +45,7 @@ import { getApiUrl, RENDER_SERVICE_URL } from '../config';
  * @param {object|null} params.effects - EffectsConfig
  * @param {function} [params.onProgress] - Progress callback (0-1)
  * @param {AbortSignal} [params.signal] - Abort signal for cancellation
- * @returns {Promise<{blobUrl: string, serverUrl: string, filename: string}>}
+ * @returns {Promise<{blobUrl: string, serverUrl: string, filename: string, version: number|null}>}
  */
 export async function renderViaService({
     jobId,
@@ -35,7 +66,6 @@ export async function renderViaService({
     console.log('[renderViaService] videoUrl:', videoUrl);
     console.log('[renderViaService] durationInFrames:', durationInFrames);
 
-    // Resolve the video URL: if relative, prepend API base
     const resolvedVideoUrl = videoUrl.startsWith('http')
         ? videoUrl
         : `${getApiUrl('')}${videoUrl}`;
@@ -93,7 +123,14 @@ export async function renderViaService({
 
         if (status.status === 'done') {
             outputUrl = status.outputUrl;
-            console.log(`[renderViaService] Render done! Output URL: ${outputUrl}`);
+            // Normalize to app-consumable /videos/ path
+            const normalized = normalizeOutputUrl(outputUrl, jobId);
+            if (normalized) {
+                outputUrl = normalized;
+            } else {
+                console.warn(`[renderViaService] Could not normalize: ${outputUrl}, will use save endpoint fallback`);
+            }
+            console.log(`[renderViaService] Render done! Output URL: ${outputUrl} (raw: ${status.outputUrl})`);
             break;
         }
 
@@ -103,8 +140,17 @@ export async function renderViaService({
     }
 
     // Step 3: Download output and create blob URL
-    console.log('[renderViaService] Downloading output...');
-    const outputResponse = await fetch(outputUrl, { signal });
+    // Reconstruct renderer path for the actual fetch; normalized path is for app consumption
+    let fetchUrl = outputUrl;
+    if (!outputUrl.startsWith('http') && !outputUrl.startsWith('blob:') && !outputUrl.startsWith('/render/')) {
+        if (outputUrl.startsWith('/videos/')) {
+            const filename = outputUrl.replace(`/videos/${jobId}/`, '');
+            fetchUrl = `${RENDER_SERVICE_URL}/render/output/${jobId}/${filename}`;
+        }
+    }
+
+    console.log('[renderViaService] Downloading output from:', fetchUrl);
+    const outputResponse = await fetch(fetchUrl, { signal });
     if (!outputResponse.ok) {
         throw new Error(`Failed to fetch output: ${outputResponse.status}`);
     }

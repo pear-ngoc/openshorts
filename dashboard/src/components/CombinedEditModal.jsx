@@ -59,6 +59,7 @@ export default function CombinedEditModal({
     existingHook,
     renderedOutputs,
     onDownloadLatest,
+    renderProgress,
 }) {
     const [durationSec, setDurationSec] = useState(clipDuration || 30);
 
@@ -302,8 +303,11 @@ export default function CombinedEditModal({
 
                 {/* Left: Preview */}
                 <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] max-h-[600px]">
+                    {/* Animated progress border — shows during rendering */}
+                    {isProcessing && <ProgressBorder progress={renderProgress || 0} />}
+
                     {isProcessing ? (
-                        <div className="flex flex-col items-center justify-center gap-4 p-8 text-center">
+                        <div className="flex flex-col items-center justify-center gap-3 p-8 text-center relative z-10">
                             <Loader2 size={40} className="text-primary animate-spin" />
                             <div>
                                 <p className="text-white font-bold text-sm">
@@ -312,8 +316,13 @@ export default function CombinedEditModal({
                                      processingStage === 'saving' ? 'Saving to server...' :
                                      'Processing...'}
                                 </p>
+                                {processingStage === 'rendering' && renderProgress != null && (
+                                    <p className="text-primary font-bold text-xs mt-2 tracking-widest">
+                                        {Math.round((renderProgress || 0) * 100)}%
+                                    </p>
+                                )}
                                 <p className="text-zinc-400 text-xs mt-1">
-                                    {processingStage === 'rendering' && 'This may take a few minutes for longer videos'}
+                                    {processingStage === 'rendering' && 'Applying effects to your video...'}
                                 </p>
                             </div>
                         </div>
@@ -540,24 +549,39 @@ export default function CombinedEditModal({
                             {isProcessing ? 'Processing...' : 'Render All'}
                         </button>
 
-                        {/* Download Latest */}
-                        <button
-                            onClick={handleDownload}
-                            disabled={!latestOutput || isDownloading}
-                            title={!latestOutput ? 'Render first to download' : undefined}
-                            className={`flex-1 py-3 rounded-xl font-bold shadow-lg transition-all active:scale-[0.98] flex items-center justify-center gap-2 ${
-                                latestOutput && !isDownloading
-                                    ? 'bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white shadow-green-500/20'
-                                    : 'bg-white/5 text-zinc-500 border border-white/5 cursor-not-allowed'
-                            }`}
-                        >
-                            {isDownloading ? (
-                                <Loader2 size={20} className="animate-spin" />
-                            ) : (
-                                <Download size={20} />
+                        {/* Download Latest — gradient progress during render, green when done */}
+                        <div className="relative flex-1 overflow-hidden rounded-xl">
+                            {/* Gradient fill layer — width driven by renderProgress */}
+                            {isProcessing && (
+                                <div
+                                    className="absolute inset-0 bg-gradient-to-r from-cyan-500 via-purple-500 to-pink-500"
+                                    style={{
+                                        width: `${Math.round((renderProgress || 0) * 100)}%`,
+                                        transition: 'width 0.3s ease',
+                                        opacity: 0.5,
+                                    }}
+                                />
                             )}
-                            {isDownloading ? 'Downloading...' : 'Download Latest'}
-                        </button>
+                            <button
+                                onClick={handleDownload}
+                                disabled={(!latestOutput && !isProcessing) || isDownloading}
+                                title={!latestOutput && !isProcessing ? 'Render first to download' : undefined}
+                                className={`relative w-full py-3 rounded-xl font-bold shadow-lg transition-all active:scale-[0.98] flex items-center justify-center gap-2 ${
+                                    latestOutput && !isDownloading && !isProcessing
+                                        ? 'bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white shadow-green-500/20'
+                                        : !latestOutput && !isProcessing
+                                        ? 'bg-white/5 text-zinc-500 border border-white/5 cursor-not-allowed'
+                                        : 'bg-black/40 text-white/70 cursor-default'
+                                }`}
+                            >
+                                {isDownloading ? (
+                                    <Loader2 size={20} className="animate-spin" />
+                                ) : (
+                                    <Download size={20} />
+                                )}
+                                {isDownloading ? 'Downloading...' : isProcessing ? `Rendering ${Math.round((renderProgress || 0) * 100)}%` : 'Download Latest'}
+                            </button>
+                        </div>
                     </div>
 
                     {/* Download error */}
@@ -569,6 +593,60 @@ export default function CombinedEditModal({
                 </div>
             </div>
         </div>
+    );
+}
+
+/* --- SVG Progress Border Component ---
+ * Draws an animated border around the preview rectangle, advancing clockwise
+ * from the middle of the top edge. The border "draws" from 0% to 100% as
+ * renderProgress goes from 0 to 1.
+ */
+function ProgressBorder({ progress }) {
+    // Perimeter of the rounded rect (approximation used for dash calculations).
+    // stroke-dasharray/dashoffset must equal this for accurate 0-100% mapping.
+    const perimeter = 2000;
+
+    // At progress=0: full offset → no stroke visible.
+    // At progress=1: offset=0 → full stroke visible.
+    // The gap (the "unpainted" part) shrinks as progress increases.
+    const dashOffset = perimeter * (1 - Math.min(1, Math.max(0, progress)));
+
+    return (
+        <svg
+            width="100%"
+            height="100%"
+            style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }}
+        >
+            <defs>
+                <linearGradient id="borderGrad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0%"   stopColor="#06B6D4" />
+                    <stop offset="50%"  stopColor="#A855F7" />
+                    <stop offset="100%" stopColor="#EC4899" />
+                </linearGradient>
+            </defs>
+            {/*
+                The rect's start point is 3 o'clock by default in SVG.
+                Rotating -90° moves the start point to 12 o'clock (top-center).
+                stroke-dashoffset shrinks from perimeter→0 as progress grows,
+                revealing the stroke clockwise from top-center.
+                rx=12 matches the preview container's border-radius.
+            */}
+            <rect
+                x="6"
+                y="6"
+                width="calc(100% - 12px)"
+                height="calc(100% - 12px)"
+                rx="12"
+                ry="12"
+                fill="none"
+                stroke="url(#borderGrad)"
+                strokeWidth="2.5"
+                strokeDasharray={perimeter}
+                strokeDashoffset={dashOffset}
+                strokeLinecap="round"
+                transform="rotate(-90)"
+            />
+        </svg>
     );
 }
 

@@ -18,23 +18,32 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [showModal, setShowModal] = useState(false);
     const videoRef = useRef(null);
 
-    // Derived from the clip prop so it stays in sync during polling updates.
-    // user actions (edit/subtitle/hook/translate) overwrite this via setCurrentVideoUrl.
+    // Canonical source URL from backend (changes when server-side edits happen)
     const [originalVideoUrl, setOriginalVideoUrl] = useState(getApiUrl(clip.video_url));
+
+    // Active video source for the player; guarded against stale polling
     const [currentVideoUrl, setCurrentVideoUrl] = useState(originalVideoUrl);
 
-    // Sync originalVideoUrl when the clip prop changes (e.g., polling update).
-    // Does NOT reset currentVideoUrl here; the separate effect below handles loading.
+    // Track the most recent server-rendered URL + metadata (for download & cache-bust)
+    const [latestRenderedUrl, setLatestRenderedUrl] = useState(null);
+    const [latestRenderVersion, setLatestRenderVersion] = useState(null);
+    const [latestDownloadFilename, setLatestDownloadFilename] = useState(null);
+
+    // Sync originalVideoUrl when the server prop changes (e.g., job re-poll).
+    // Does NOT reset currentVideoUrl if we have a pending local render — the
+    // stale-guard in the render effect handles that.
     useEffect(() => {
         const newUrl = getApiUrl(clip.video_url);
         if (newUrl !== originalVideoUrl) {
             setOriginalVideoUrl(newUrl);
-            setCurrentVideoUrl(newUrl);
+            // Only sync currentVideoUrl when there's no pending local render
+            if (!latestRenderedUrl) {
+                setCurrentVideoUrl(newUrl);
+            }
         }
     }, [clip.video_url]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Reload the video element whenever currentVideoUrl changes.
-    // Actions set currentVideoUrl to a blob/edited URL; polling sets it back to originalVideoUrl.
     useEffect(() => {
         if (videoRef.current) {
             videoRef.current.load();
@@ -43,9 +52,6 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
     // Accumulate Remotion layers across operations
     const [activeLayers, setActiveLayers] = useState({ subtitles: null, hook: null, effects: null });
-
-    // Tracks the blob URL of the most recent rendered video for download
-    const [renderedBlobUrl, setRenderedBlobUrl] = useState(null);
 
     // Reset Remotion layers when the base clip changes, since those layers
     // are tied to the original source video.
@@ -124,7 +130,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
             if (hasAnyLayer) {
                 setProcessingStage('rendering');
-                const { blobUrl, serverUrl } = await renderViaService({
+                const result = await renderViaService({
                     jobId,
                     clipIndex: index,
                     videoUrl: originalVideoUrl,
@@ -134,13 +140,18 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     effects: layers.effects,
                 });
 
-                newVideoUrl = serverUrl || blobUrl;
-                setRenderedBlobUrl(blobUrl);
-                setActiveLayers(layers);
-            }
+                newVideoUrl = result.serverUrl || result.blobUrl;
 
-            if (newVideoUrl) {
-                setCurrentVideoUrl(newVideoUrl);
+                // Build cache-busted player URL
+                const playerUrl = result.version
+                    ? `${result.serverUrl || result.blobUrl}?v=${result.version}`
+                    : (result.serverUrl || result.blobUrl);
+
+                setLatestRenderedUrl(result.serverUrl || result.blobUrl);
+                setLatestRenderVersion(result.version);
+                setLatestDownloadFilename(result.filename);
+                setCurrentVideoUrl(playerUrl);
+                setActiveLayers(layers);
                 if (videoRef.current) videoRef.current.load();
             }
 
@@ -203,7 +214,11 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             const data = await res.json();
             console.log('[Translate] Success response:', data);
             if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                const newUrl = getApiUrl(data.new_video_url);
+                setCurrentVideoUrl(newUrl);
+                setLatestRenderedUrl(newUrl);
+                setLatestDownloadFilename(`${jobId}_clip_${index + 1}.mp4`);
+                setLatestRenderVersion(null);
                 if (videoRef.current) {
                     videoRef.current.load();
                 }
@@ -417,9 +432,38 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             e.preventDefault();
                             e.stopPropagation();
 
-                            // Download rendered video if available
-                            if (renderedBlobUrl) {
-                                downloadBlobUrl(renderedBlobUrl, `clip-${index + 1}-rendered.mp4`);
+                            // Use the latest server-rendered URL if available
+                            if (latestRenderedUrl) {
+                                const urlToFetch = latestRenderVersion
+                                    ? `${latestRenderedUrl}?v=${latestRenderVersion}`
+                                    : latestRenderedUrl;
+                                setIsSendingToTL(true);
+                                try {
+                                    const response = await fetch(urlToFetch);
+                                    if (!response.ok) throw new Error('Download failed');
+                                    const blob = await response.blob();
+                                    const objUrl = window.URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.style.display = 'none';
+                                    a.href = objUrl;
+                                    a.download = latestDownloadFilename || `${jobId}_clip_${index + 1}.mp4`;
+                                    document.body.appendChild(a);
+                                    a.click();
+                                    window.URL.revokeObjectURL(objUrl);
+                                    document.body.removeChild(a);
+                                    fetch(getApiUrl('/api/jobs/downloaded'), {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ job_id: jobId, clip_index: index })
+                                    }).catch(() => {});
+                                    setTLResult({ success: true, msg: 'Downloaded!' });
+                                } catch (err) {
+                                    console.error('Download error:', err);
+                                    setTLResult({ success: false, msg: 'Download failed' });
+                                } finally {
+                                    setIsSendingToTL(false);
+                                    setTimeout(() => setTLResult(null), 4000);
+                                }
                                 return;
                             }
 
@@ -433,12 +477,11 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                 const a = document.createElement('a');
                                 a.style.display = 'none';
                                 a.href = url;
-                                a.download = `clip-${index + 1}.mp4`;
+                                a.download = `${jobId}_clip_${index + 1}.mp4`;
                                 document.body.appendChild(a);
                                 a.click();
                                 window.URL.revokeObjectURL(url);
                                 document.body.removeChild(a);
-
                                 fetch(getApiUrl('/api/jobs/downloaded'), {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
@@ -455,10 +498,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             }
                         }}
                         disabled={isSendingToTL}
-                        className={`col-span-1 py-2 rounded-lg text-xs font-medium transition-all active:scale-[0.98] flex items-center justify-center gap-2 border truncate px-2 ${renderedBlobUrl ? 'bg-green-500/20 border-green-500/30 text-green-400 hover:bg-green-500/30 shadow-green-500/10 shadow-lg' : 'bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white border-white/5'}`}
+                        className={`col-span-1 py-2 rounded-lg text-xs font-medium transition-all active:scale-[0.98] flex items-center justify-center gap-2 border truncate px-2 ${latestRenderedUrl ? 'bg-green-500/20 border-green-500/30 text-green-400 hover:bg-green-500/30 shadow-green-500/10 shadow-lg' : 'bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white border-white/5'}`}
                     >
                         {isSendingToTL ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} className="shrink-0" />}
-                        {isSendingToTL ? 'Processing...' : renderedBlobUrl ? 'Download Rendered' : 'Download'}
+                        {isSendingToTL ? 'Processing...' : latestRenderedUrl ? 'Download Rendered' : 'Download'}
                     </button>
                 </div>
             </div>

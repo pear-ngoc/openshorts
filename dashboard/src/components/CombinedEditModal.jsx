@@ -107,30 +107,59 @@ export default function CombinedEditModal({
             setHookText(existingHook);
         }
     }, [isOpen, existingHook]);
+
+    // Load duration — uses prop if provided, otherwise fetches from transcript
     useEffect(() => {
         if (!isOpen || !jobId || clipIndex === undefined) return;
 
-        const fetchData = async () => {
-            // Duration
-            if (clipDuration) {
-                setDurationSec(clipDuration);
-            } else {
-                try {
-                    const res = await fetch(getApiUrl(`/api/clip/${jobId}/${clipIndex}/transcript`));
-                    if (res.ok) {
-                        const data = await res.json();
-                        if (data.durationSec) setDurationSec(data.durationSec);
-                        if (data.captions && data.captions.length > 0) {
-                            setCaptions(data.captions);
-                            setOriginalCaptions(data.captions);
-                            setEditableText(data.captions.map(c => c.text).join(' '));
-                        }
-                    }
-                } catch (_) {}
-            }
-        };
-        fetchData();
+        if (clipDuration) {
+            setDurationSec(clipDuration);
+            return;
+        }
+
+        const controller = new AbortController();
+
+        fetch(getApiUrl(`/api/clip/${jobId}/${clipIndex}/transcript`), { signal: controller.signal })
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (data?.durationSec) setDurationSec(data.durationSec);
+            })
+            .catch(err => { if (err.name !== 'AbortError') {} });
     }, [isOpen, jobId, clipIndex, clipDuration]);
+
+    // Always fetch captions when modal opens, regardless of clipDuration
+    useEffect(() => {
+        if (!isOpen || !jobId || clipIndex === undefined) return;
+
+        const controller = new AbortController();
+        setCaptionsLoading(true);
+
+        fetch(getApiUrl(`/api/clip/${jobId}/${clipIndex}/transcript`), { signal: controller.signal })
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (data?.captions && data.captions.length > 0) {
+                    setCaptions(data.captions);
+                    setOriginalCaptions(data.captions);
+                    setEditableText(data.captions.map(c => c.text).join(' '));
+                } else {
+                    setCaptions([]);
+                    setOriginalCaptions([]);
+                    setEditableText('');
+                }
+            })
+            .catch(err => {
+                if (err.name !== 'AbortError') {
+                    setCaptions([]);
+                    setOriginalCaptions([]);
+                    setEditableText('');
+                }
+            })
+            .finally(() => {
+                if (!controller.signal.aborted) setCaptionsLoading(false);
+            });
+
+        return () => controller.abort();
+    }, [isOpen, jobId, clipIndex]);
 
     // Generate auto-edit effects when enabled
     const generateEffects = useCallback(async () => {

@@ -120,7 +120,9 @@ export async function renderViaService({
     formData.append('clip_index', String(clipIndex));
     formData.append('file', blob, `rendered_clip_${clipIndex}.mp4`);
 
-    let serverUrl = blobUrl; // fallback
+    let serverUrl = blobUrl;
+    let downloadFilename = `${jobId}_clip_${clipIndex + 1}.mp4`;
+    let serverVersion = null;
 
     try {
         const saveResponse = await fetch(getApiUrl('/api/render/save'), {
@@ -132,7 +134,9 @@ export async function renderViaService({
         if (saveResponse.ok) {
             const saveData = await saveResponse.json();
             serverUrl = getApiUrl(saveData.video_url);
-            console.log(`[renderViaService] Saved to server: ${serverUrl}`);
+            downloadFilename = saveData.download_filename || downloadFilename;
+            serverVersion = saveData.version || null;
+            console.log(`[renderViaService] Saved to server: ${serverUrl}, version: ${serverVersion}`);
         } else {
             const errText = await saveResponse.text();
             console.warn(`[renderViaService] Save failed (${saveResponse.status}): ${errText}, using blob URL`);
@@ -144,6 +148,7 @@ export async function renderViaService({
     return {
         blobUrl,
         serverUrl,
-        filename: `${jobId}_clip_${clipIndex}.mp4`,
+        filename: downloadFilename,
+        version: serverVersion,
     };
 }

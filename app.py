@@ -988,27 +988,53 @@ async def save_rendered_video(
 ):
     """
     Receives a rendered video blob from the frontend (after browser download),
-    saves it to the output directory with proper naming, and returns the URL.
+    saves it to the output directory with canonical naming, persists the new
+    URL back into the in-memory job state and metadata JSON, and returns the
+    updated URL along with version info for cache-busting.
     """
     try:
         job_output_dir = os.path.join(OUTPUT_DIR, job_id)
         os.makedirs(job_output_dir, exist_ok=True)
 
-        # Build filename like: {job_id}_clip_{index}.mp4
+        # Canonical name: 1-based clip number
         ext = os.path.splitext(file.filename)[1] if file.filename else ".mp4"
-        safe_name = f"{job_id}_clip_{clip_index}{ext}"
-        output_path = os.path.join(job_output_dir, safe_name)
+        canonical_name = f"{job_id}_clip_{clip_index + 1}{ext}"
+        output_path = os.path.join(job_output_dir, canonical_name)
 
         content = await file.read()
         with open(output_path, "wb") as f:
             f.write(content)
 
-        video_url = f"/videos/{job_id}/{safe_name}"
+        video_url = f"/videos/{job_id}/{canonical_name}"
+        version = int(os.path.getmtime(output_path))
         logger.info(f"[render/save] Saved: {output_path} ({len(content)} bytes)")
+
+        # Persist new URL to in-memory job state
+        if job_id in jobs and "result" in jobs[job_id] and "clips" in jobs[job_id]["result"]:
+            if clip_index < len(jobs[job_id]["result"]["clips"]):
+                jobs[job_id]["result"]["clips"][clip_index]["video_url"] = video_url
+
+        # Persist new URL to metadata JSON on disk
+        try:
+            json_files = glob.glob(os.path.join(job_output_dir, "*_metadata.json"))
+            if json_files:
+                with open(json_files[0], 'r') as mf:
+                    data = json.load(mf)
+                shorts = data.get("shorts", [])
+                if clip_index < len(shorts):
+                    shorts[clip_index]["video_url"] = video_url
+                    data["shorts"] = shorts
+                    with open(json_files[0], 'w') as mf:
+                        json.dump(data, mf, indent=4)
+                    logger.info(f"[render/save] Updated metadata: {json_files[0]}")
+        except Exception as meta_err:
+            logger.warning(f"[render/save] Could not update metadata.json: {meta_err}")
 
         return {
             "video_url": video_url,
-            "filename": safe_name,
+            "filename": canonical_name,
+            "download_filename": canonical_name,
+            "version": version,
             "size": len(content),
         }
     except Exception as e:
